@@ -1,17 +1,27 @@
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENV_PATH = PROJECT_ROOT / ".env"
 
 
 class StrategyService:
     def __init__(self):
-        api_key = os.getenv("OPENAI_API_KEY")
+        load_dotenv(
+            dotenv_path=ENV_PATH,
+            override=True
+        )
+
+        api_key = os.getenv(
+            "OPENAI_API_KEY",
+            ""
+        ).strip()
 
         if not api_key:
             raise RuntimeError(

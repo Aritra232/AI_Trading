@@ -14,6 +14,9 @@ from service.risk_service import RiskService
 from service.strategy_service import StrategyService
 from service.decision_service import DecisionService
 from service.safety_service import SafetyService
+from service.execution_service import ExecutionService
+from service.bot_service import BotService
+from service.market_status_service import MarketStatusService
 
 app = FastAPI(
     title="TopstepX API Test",
@@ -57,6 +60,30 @@ strategy_service = StrategyService()
 decision_service = DecisionService()
 
 safety_service = SafetyService()
+
+execution_service = ExecutionService(
+    order_service=order_service
+)
+
+bot_service = BotService(
+    contract_service=contract_service,
+    trading_state_service=trading_state_service,
+    realtime_service=realtime_service,
+    rule_service=rule_service,
+    risk_service=risk_service,
+    strategy_service=strategy_service,
+    decision_service=decision_service,
+    safety_service=safety_service,
+    execution_service=execution_service
+)
+
+market_status_service = MarketStatusService(
+    account_service=account_service,
+    contract_service=contract_service,
+    history_service=history_service,
+    realtime_service=realtime_service
+)
+
 
 # =========================
 # System
@@ -169,6 +196,37 @@ async def get_history(
             unit_number=unit_number,
             limit=limit,
             live=live
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.get(
+    "/topstep/market/status",
+    tags=["Market Data"]
+)
+async def get_market_status(
+    account_id: int,
+    symbol: str = "MES",
+    live: bool = False,
+    auto_start_realtime: bool = True,
+    realtime_warmup_seconds: int = 3,
+    max_quote_age_seconds: int = 30,
+    lookback_hours: int = 96
+):
+    try:
+        return await market_status_service.get_status(
+            account_id=account_id,
+            symbol=symbol,
+            live=live,
+            auto_start_realtime=auto_start_realtime,
+            realtime_warmup_seconds=realtime_warmup_seconds,
+            max_quote_age_seconds=max_quote_age_seconds,
+            lookback_hours=lookback_hours
         )
 
     except Exception as exc:
@@ -849,6 +907,205 @@ async def evaluate_final_decision(
                 planned_quantity
             )
         )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+# =========================
+# Execution Engine
+# =========================
+
+@app.post(
+    "/topstep/bot/run-once",
+    tags=["Bot"]
+)
+async def run_bot_once(
+    account_id: int,
+
+    symbol: str = "MES",
+
+    dry_run: bool = True,
+
+    account_size: int = 50000,
+
+    planned_quantity: int = 1,
+
+    current_mll: float | None = None,
+
+    best_day_profit: float | None = None,
+
+    max_risk_per_trade: float | None = None,
+
+    daily_pnl: float | None = None,
+
+    daily_loss_limit: float | None = None,
+
+    max_position_quantity: int | None = None,
+
+    kill_switch: bool = False,
+
+    max_quote_age_seconds: int = 30,
+
+    order_type: str = "MARKET",
+
+    lookback_hours: int = 72,
+
+    auto_start_realtime: bool = True,
+
+    realtime_warmup_seconds: int = 3,
+
+    live: bool = False
+):
+    try:
+        return await bot_service.run_once(
+            account_id=account_id,
+            account_size=account_size,
+            symbol=symbol,
+            dry_run=dry_run,
+            planned_quantity=planned_quantity,
+            current_mll=current_mll,
+            best_day_profit=best_day_profit,
+            max_risk_per_trade=max_risk_per_trade,
+            daily_pnl=daily_pnl,
+            daily_loss_limit=daily_loss_limit,
+            max_position_quantity=max_position_quantity,
+            kill_switch=kill_switch,
+            max_quote_age_seconds=max_quote_age_seconds,
+            order_type=order_type,
+            lookback_hours=lookback_hours,
+            auto_start_realtime=auto_start_realtime,
+            realtime_warmup_seconds=realtime_warmup_seconds,
+            live=live
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.post(
+    "/topstep/execution/dry-run",
+    tags=["Execution Engine"]
+)
+async def dry_run_execution(
+    account_id: int,
+    contract_id: str,
+
+    account_size: int = 50000,
+
+    symbol: str = "MES",
+    search_text: str = "MES",
+
+    planned_quantity: int = 1,
+
+    current_mll: float | None = None,
+
+    best_day_profit: float | None = None,
+
+    max_risk_per_trade: float | None = None,
+
+    daily_pnl: float | None = None,
+
+    daily_loss_limit: float | None = None,
+
+    max_position_quantity: int | None = None,
+
+    kill_switch: bool = False,
+
+    max_quote_age_seconds: int = 30,
+
+    order_type: str = "MARKET",
+
+    start_time: str | None = None,
+
+    end_time: str | None = None,
+
+    live: bool = False
+):
+    try:
+        safety_workflow = await evaluate_safety(
+            account_id=account_id,
+            contract_id=contract_id,
+            account_size=account_size,
+            symbol=symbol,
+            search_text=search_text,
+            planned_quantity=planned_quantity,
+            current_mll=current_mll,
+            best_day_profit=best_day_profit,
+            max_risk_per_trade=max_risk_per_trade,
+            daily_pnl=daily_pnl,
+            daily_loss_limit=daily_loss_limit,
+            max_position_quantity=max_position_quantity,
+            kill_switch=kill_switch,
+            max_quote_age_seconds=max_quote_age_seconds,
+            start_time=start_time,
+            end_time=end_time,
+            live=live
+        )
+
+        final_decision = safety_workflow.get(
+            "final_decision"
+        )
+
+        safety_result = safety_workflow.get(
+            "safety",
+            safety_workflow
+        )
+
+        state = await trading_state_service.get_trading_state(
+            account_id=account_id,
+            contract_id=contract_id,
+            search_text=search_text,
+            live=live,
+            start_time=None,
+            end_time=None
+        )
+
+        contract = state.get(
+            "contract"
+        )
+
+        if contract is None:
+            raise ValueError(
+                "Contract information is unavailable."
+            )
+
+        execution_result = (
+            execution_service.prepare_execution(
+                account_id=account_id,
+                contract_id=contract_id,
+                final_decision=final_decision,
+                safety_result=safety_result,
+                contract=contract,
+                dry_run=True,
+                order_type=order_type
+            )
+        )
+
+        return {
+            "success": True,
+            "workflow": {
+                "ready_for_execution": safety_workflow.get(
+                    "ready_for_execution",
+                    False
+                ),
+                "safety_status": safety_result.get(
+                    "safety_status"
+                ),
+                "safe_to_execute": safety_result.get(
+                    "safe_to_execute"
+                )
+            },
+            "execution": execution_result
+        }
 
     except Exception as exc:
 
