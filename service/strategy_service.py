@@ -35,7 +35,17 @@ class StrategyService:
         if not historical_bars:
             return []
 
-        return historical_bars[:max_bars]
+        sorted_bars = sorted(
+            historical_bars,
+            key=lambda bar: str(
+                bar.get(
+                    "t",
+                    ""
+                )
+            )
+        )
+
+        return sorted_bars[-max_bars:]
 
     def evaluate_strategy(
         self,
