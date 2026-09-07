@@ -281,6 +281,18 @@ class SafetyService:
                 )
             )
 
+        if (
+            action == "EXIT"
+            and len(positions) == 0
+        ):
+
+            blocks.append(
+                (
+                    "No open position found for "
+                    "EXIT action."
+                )
+            )
+
         # =========================
         # Position Limit
         # =========================

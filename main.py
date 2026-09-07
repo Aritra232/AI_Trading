@@ -17,6 +17,9 @@ from service.safety_service import SafetyService
 from service.execution_service import ExecutionService
 from service.bot_service import BotService
 from service.market_status_service import MarketStatusService
+from service.audit_service import AuditService
+from service.bot_state_service import BotStateService
+from service.autonomous_bot_service import AutonomousBotService
 
 app = FastAPI(
     title="TopstepX API Test",
@@ -62,8 +65,13 @@ decision_service = DecisionService()
 safety_service = SafetyService()
 
 execution_service = ExecutionService(
-    order_service=order_service
+    order_service=order_service,
+    position_service=position_service
 )
+
+audit_service = AuditService()
+
+bot_state_service = BotStateService()
 
 bot_service = BotService(
     contract_service=contract_service,
@@ -74,7 +82,15 @@ bot_service = BotService(
     strategy_service=strategy_service,
     decision_service=decision_service,
     safety_service=safety_service,
-    execution_service=execution_service
+    execution_service=execution_service,
+    audit_service=audit_service,
+    bot_state_service=bot_state_service
+)
+
+autonomous_bot_service = AutonomousBotService(
+    bot_service=bot_service,
+    bot_state_service=bot_state_service,
+    audit_service=audit_service
 )
 
 market_status_service = MarketStatusService(
@@ -97,6 +113,14 @@ def health():
     return {
         "status": "ok"
     }
+
+
+@app.on_event(
+    "shutdown"
+)
+async def shutdown_services():
+    await autonomous_bot_service.stop()
+    realtime_service.stop_all()
 
 
 # =========================
@@ -981,6 +1005,191 @@ async def run_bot_once(
             auto_start_realtime=auto_start_realtime,
             realtime_warmup_seconds=realtime_warmup_seconds,
             live=live
+        )
+
+    except Exception as exc:
+        bot_state_service.mark_run_failed(
+            error=exc,
+            context={
+                "account_id": account_id,
+                "symbol": symbol,
+                "dry_run": dry_run,
+                "live": live
+            }
+        )
+
+        audit_service.log_error(
+            event_type="BOT_RUN_FAILED",
+            error=exc,
+            context={
+                "account_id": account_id,
+                "symbol": symbol,
+                "dry_run": dry_run,
+                "live": live
+            }
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.get(
+    "/topstep/bot/status",
+    tags=["Bot"]
+)
+async def get_bot_status():
+    try:
+        return autonomous_bot_service.status()
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.post(
+    "/topstep/bot/start",
+    tags=["Bot"]
+)
+async def start_bot(
+    account_id: int,
+
+    symbol: str = "MES",
+
+    dry_run: bool = True,
+
+    account_size: int = 50000,
+
+    planned_quantity: int = 1,
+
+    current_mll: float | None = None,
+
+    best_day_profit: float | None = None,
+
+    max_risk_per_trade: float | None = None,
+
+    daily_pnl: float | None = None,
+
+    daily_loss_limit: float | None = None,
+
+    max_position_quantity: int | None = None,
+
+    max_quote_age_seconds: int = 30,
+
+    order_type: str = "MARKET",
+
+    lookback_hours: int = 72,
+
+    auto_start_realtime: bool = True,
+
+    realtime_warmup_seconds: int = 3,
+
+    live: bool = False,
+
+    interval_seconds: int = 60
+):
+    try:
+        return await autonomous_bot_service.start(
+            account_id=account_id,
+            account_size=account_size,
+            symbol=symbol,
+            dry_run=dry_run,
+            planned_quantity=planned_quantity,
+            current_mll=current_mll,
+            best_day_profit=best_day_profit,
+            max_risk_per_trade=max_risk_per_trade,
+            daily_pnl=daily_pnl,
+            daily_loss_limit=daily_loss_limit,
+            max_position_quantity=max_position_quantity,
+            max_quote_age_seconds=max_quote_age_seconds,
+            order_type=order_type,
+            lookback_hours=lookback_hours,
+            auto_start_realtime=auto_start_realtime,
+            realtime_warmup_seconds=realtime_warmup_seconds,
+            live=live,
+            interval_seconds=interval_seconds
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.post(
+    "/topstep/bot/stop",
+    tags=["Bot"]
+)
+async def stop_bot():
+    try:
+        return await autonomous_bot_service.stop()
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.post(
+    "/topstep/bot/kill-switch/enable",
+    tags=["Bot"]
+)
+async def enable_bot_kill_switch(
+    reason: str = "Manual emergency stop."
+):
+    try:
+        return bot_state_service.enable_kill_switch(
+            reason=reason,
+            updated_by="api"
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.post(
+    "/topstep/bot/kill-switch/disable",
+    tags=["Bot"]
+)
+async def disable_bot_kill_switch(
+    reason: str = "Manual reset."
+):
+    try:
+        return bot_state_service.disable_kill_switch(
+            reason=reason,
+            updated_by="api"
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.get(
+    "/topstep/audit/recent",
+    tags=["Audit"]
+)
+async def get_recent_audit_logs(
+    limit: int = 50
+):
+    try:
+        return audit_service.read_recent(
+            limit=limit
         )
 
     except Exception as exc:

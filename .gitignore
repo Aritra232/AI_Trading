@@ -53,6 +53,8 @@ htmlcov/
 *.tmp
 temp/
 *.log
+logs/
+state/
 
 # Video/Media files (optional - uncomment if needed)
 # *.mp4

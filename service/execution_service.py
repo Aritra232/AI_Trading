@@ -19,9 +19,11 @@ class ExecutionService:
 
     def __init__(
         self,
-        order_service=None
+        order_service=None,
+        position_service=None
     ):
         self.order_service = order_service
+        self.position_service = position_service
 
     def _build_custom_tag(
         self,
@@ -286,6 +288,87 @@ class ExecutionService:
             "execution_version": "EXECUTION_DRY_RUN_V1"
         }
 
+    def _prepare_allowed_exit(
+        self,
+        account_id: int,
+        contract_id: str,
+        final_decision: dict,
+        safety_result: dict
+    ) -> dict:
+        if not final_decision:
+            return {
+                "success": True,
+                "execution_status": "BLOCKED",
+                "submitted": False,
+                "reason": "Final decision is unavailable."
+            }
+
+        if not safety_result:
+            return {
+                "success": True,
+                "execution_status": "BLOCKED",
+                "submitted": False,
+                "reason": "Safety result is unavailable."
+            }
+
+        execution_allowed = bool(
+            final_decision.get(
+                "execution_allowed",
+                False
+            )
+        )
+
+        safe_to_execute = bool(
+            safety_result.get(
+                "safe_to_execute",
+                False
+            )
+        )
+
+        if not execution_allowed or not safe_to_execute:
+            return {
+                "success": True,
+                "execution_status": "BLOCKED",
+                "submitted": False,
+                "reason": (
+                    "Execution is blocked by final decision "
+                    "or safety validation."
+                ),
+                "execution_allowed": execution_allowed,
+                "safe_to_execute": safe_to_execute
+            }
+
+        close_payload = {
+            "accountId": account_id,
+            "contractId": contract_id,
+            "customTag": self._build_custom_tag(
+                account_id=account_id,
+                contract_id=contract_id,
+                action="EXIT"
+            )
+        }
+
+        return {
+            "success": True,
+            "submitted": False,
+            "action": "EXIT",
+            "close_payload": close_payload,
+            "final_decision_summary": {
+                "final_status": final_decision.get(
+                    "final_status"
+                ),
+                "action": "EXIT",
+                "execution_allowed": execution_allowed
+            },
+            "safety_summary": {
+                "safety_status": safety_result.get(
+                    "safety_status"
+                ),
+                "safe_to_execute": safe_to_execute
+            },
+            "execution_version": "EXECUTION_DRY_RUN_V1"
+        }
+
     def prepare_execution(
         self,
         account_id: int,
@@ -296,6 +379,40 @@ class ExecutionService:
         dry_run: bool = True,
         order_type: str = "MARKET"
     ) -> dict:
+        action = str(
+            (final_decision or {}).get(
+                "action",
+                "WAIT"
+            )
+        ).upper()
+
+        if action == "EXIT":
+            prepared = self._prepare_allowed_exit(
+                account_id=account_id,
+                contract_id=contract_id,
+                final_decision=final_decision,
+                safety_result=safety_result
+            )
+
+            prepared["dry_run"] = dry_run
+
+            if prepared.get(
+                "execution_status"
+            ) == "BLOCKED":
+                return prepared
+
+            prepared["execution_status"] = (
+                "DRY_RUN_CLOSE_READY"
+            )
+            prepared["message"] = (
+                "Close-position request prepared but not submitted."
+            )
+            prepared["execution_version"] = (
+                "EXECUTION_DRY_RUN_V1"
+            )
+
+            return prepared
+
         prepared = self._prepare_allowed_order(
             account_id=account_id,
             contract_id=contract_id,
@@ -351,6 +468,56 @@ class ExecutionService:
             ) == "BLOCKED"
         ):
             return prepared
+
+        if prepared.get(
+            "action"
+        ) == "EXIT":
+            if self.position_service is None:
+                return {
+                    **prepared,
+                    "execution_status": "BLOCKED",
+                    "submitted": False,
+                    "reason": (
+                        "Position service is not configured."
+                    ),
+                    "execution_version": (
+                        "EXECUTION_LIVE_V1"
+                    )
+                }
+
+            position_response = (
+                await self.position_service.close_contract_position(
+                    account_id=account_id,
+                    contract_id=contract_id
+                )
+            )
+
+            submitted = bool(
+                position_response.get(
+                    "success",
+                    False
+                )
+            )
+
+            return {
+                **prepared,
+                "execution_status": (
+                    "CLOSE_SUBMITTED"
+                    if submitted
+                    else "CLOSE_REJECTED"
+                ),
+                "dry_run": False,
+                "submitted": submitted,
+                "message": (
+                    "Close-position request submitted to ProjectX."
+                    if submitted
+                    else "ProjectX rejected the close-position request."
+                ),
+                "position_response": position_response,
+                "execution_version": (
+                    "EXECUTION_LIVE_V1"
+                )
+            }
 
         if self.order_service is None:
             return {

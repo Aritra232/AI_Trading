@@ -13,7 +13,9 @@ class BotService:
         strategy_service,
         decision_service,
         safety_service,
-        execution_service
+        execution_service,
+        audit_service=None,
+        bot_state_service=None
     ):
         self.contract_service = contract_service
         self.trading_state_service = trading_state_service
@@ -24,6 +26,8 @@ class BotService:
         self.decision_service = decision_service
         self.safety_service = safety_service
         self.execution_service = execution_service
+        self.audit_service = audit_service
+        self.bot_state_service = bot_state_service
 
     def _utc_now_iso(self):
         return datetime.now(
@@ -274,6 +278,59 @@ class BotService:
         realtime_warmup_seconds: int = 3,
         live: bool = False
     ):
+        request_context = {
+            "account_id": account_id,
+            "symbol": symbol,
+            "dry_run": dry_run,
+            "account_size": account_size,
+            "planned_quantity": planned_quantity,
+            "current_mll": current_mll,
+            "best_day_profit": best_day_profit,
+            "max_risk_per_trade": max_risk_per_trade,
+            "daily_pnl": daily_pnl,
+            "daily_loss_limit": daily_loss_limit,
+            "max_position_quantity": max_position_quantity,
+            "kill_switch": kill_switch,
+            "max_quote_age_seconds": max_quote_age_seconds,
+            "order_type": order_type,
+            "lookback_hours": lookback_hours,
+            "auto_start_realtime": auto_start_realtime,
+            "realtime_warmup_seconds": realtime_warmup_seconds,
+            "live": live
+        }
+
+        state_snapshot = None
+        persistent_kill_switch = False
+
+        if self.bot_state_service is not None:
+            state_snapshot = self.bot_state_service.mark_run_started(
+                account_id=account_id,
+                symbol=symbol,
+                dry_run=dry_run,
+                live=live
+            )
+
+            persistent_kill_switch = bool(
+                state_snapshot.get(
+                    "kill_switch",
+                    {}
+                ).get(
+                    "enabled",
+                    False
+                )
+            )
+
+        effective_kill_switch = (
+            kill_switch
+            or persistent_kill_switch
+        )
+
+        request_context["request_kill_switch"] = kill_switch
+        request_context["persistent_kill_switch"] = (
+            persistent_kill_switch
+        )
+        request_context["kill_switch"] = effective_kill_switch
+
         contract = await self._resolve_active_contract(
             symbol=symbol,
             live=live
@@ -327,7 +384,7 @@ class BotService:
             daily_pnl=daily_pnl,
             daily_loss_limit=daily_loss_limit,
             max_position_quantity=max_position_quantity,
-            kill_switch=kill_switch,
+            kill_switch=effective_kill_switch,
             max_quote_age_seconds=max_quote_age_seconds,
             start_time=start_time,
             end_time=end_time,
@@ -373,7 +430,7 @@ class BotService:
             {}
         )
 
-        return {
+        result = {
             "success": True,
             "mode": (
                 "dry_run"
@@ -417,6 +474,18 @@ class BotService:
                 "ai_used": strategy.get(
                     "ai_used"
                 ),
+                "current_price": strategy.get(
+                    "market",
+                    {}
+                ).get(
+                    "current_price"
+                ),
+                "current_price_source": strategy.get(
+                    "market",
+                    {}
+                ).get(
+                    "current_price_source"
+                ),
                 "reason": (
                     strategy.get(
                         "reason"
@@ -457,5 +526,64 @@ class BotService:
                 False
             ),
             "execution": execution_result,
-            "bot_version": "RUN_ONCE_V1"
+            "bot_version": "RUN_ONCE_V1",
+            "bot_state": {
+                "persistent_kill_switch": persistent_kill_switch,
+                "effective_kill_switch": effective_kill_switch,
+                "last_run_state": (
+                    state_snapshot.get(
+                        "last_run",
+                        {}
+                    ).get(
+                        "state"
+                    )
+                    if state_snapshot
+                    else None
+                )
+            }
         }
+
+        if self.bot_state_service is not None:
+            state_update = self.bot_state_service.mark_run_completed(
+                result=result
+            )
+
+            result["bot_state"] = {
+                "persistent_kill_switch": bool(
+                    state_update.get(
+                        "kill_switch",
+                        {}
+                    ).get(
+                        "enabled",
+                        False
+                    )
+                ),
+                "effective_kill_switch": effective_kill_switch,
+                "last_run_state": state_update.get(
+                    "last_run",
+                    {}
+                ).get(
+                    "state"
+                ),
+                "state_file": state_update.get(
+                    "state_file"
+                )
+            }
+
+        if self.audit_service is not None:
+            audit = self.audit_service.log_bot_run(
+                result=result,
+                request_context=request_context
+            )
+
+            result["audit"] = {
+                "logged": audit.get(
+                    "success",
+                    False
+                ),
+                "log_file": audit.get(
+                    "log_file"
+                )
+            }
+
+        return result

@@ -84,6 +84,63 @@ class MarketStatusService:
             0
         )
 
+    def _to_float(
+        self,
+        value
+    ):
+        if value is None:
+            return None
+
+        try:
+            return float(
+                value
+            )
+
+        except Exception:
+            return None
+
+    def _resolve_current_price(
+        self,
+        quote_data: dict
+    ):
+        last_price = self._to_float(
+            quote_data.get(
+                "lastPrice"
+            )
+        )
+
+        if last_price is not None:
+            return last_price, "LAST_PRICE"
+
+        best_bid = self._to_float(
+            quote_data.get(
+                "bestBid"
+            )
+        )
+
+        best_ask = self._to_float(
+            quote_data.get(
+                "bestAsk"
+            )
+        )
+
+        if (
+            best_bid is not None
+            and best_ask is not None
+        ):
+            return (
+                (best_bid + best_ask) / 2,
+                "BID_ASK_MID"
+            )
+
+        if best_bid is not None:
+            return best_bid, "BID_ONLY"
+
+        if best_ask is not None:
+            return best_ask, "ASK_ONLY"
+
+        return None, "UNAVAILABLE"
+
     async def _get_account(
         self,
         account_id: int
@@ -229,6 +286,12 @@ class MarketStatusService:
             quote_timestamp
         )
 
+        current_price, current_price_source = (
+            self._resolve_current_price(
+                quote_data
+            )
+        )
+
         history = await self.history_service.get_bars(
             contract_id=contract_id,
             start_time=self._utc_lookback_iso(
@@ -300,6 +363,11 @@ class MarketStatusService:
                 )
             )
 
+        if quote and current_price is None:
+            blocks.append(
+                "Current market price is unavailable."
+            )
+
         if not latest_bar:
             warnings.append(
                 "Historical latest bar is unavailable."
@@ -362,7 +430,9 @@ class MarketStatusService:
                 ),
                 "bestAsk": quote_data.get(
                     "bestAsk"
-                )
+                ),
+                "currentPrice": current_price,
+                "currentPriceSource": current_price_source
             },
             "history": {
                 "latest_bar_time": (

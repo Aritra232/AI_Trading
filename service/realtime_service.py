@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 from typing import Any, Dict, Optional
 
@@ -33,12 +34,82 @@ class RealtimeService:
     # Helpers
     # =========================
 
+    def _debug_enabled(self) -> bool:
+        return os.getenv(
+            "REALTIME_DEBUG",
+            "false"
+        ).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on"
+        }
+
+    def _debug_print(
+        self,
+        key: str,
+        value: Any
+    ):
+        if not self._debug_enabled():
+            return
+
+        print(f"\n[REALTIME] {key}")
+        print(value)
+
     def _set_latest(self, key: str, value: Any):
         with self._lock:
             self.latest[key] = value
 
-        print(f"\n[REALTIME] {key}")
-        print(value)
+        self._debug_print(
+            key,
+            value
+        )
+
+    def _set_latest_quote(self, value: Any):
+        with self._lock:
+            previous = self.latest.get(
+                "quote"
+            )
+
+            merged = value
+
+            if (
+                isinstance(previous, dict)
+                and isinstance(value, dict)
+            ):
+                previous_data = previous.get(
+                    "data",
+                    {}
+                )
+
+                value_data = value.get(
+                    "data",
+                    {}
+                )
+
+                if (
+                    isinstance(previous_data, dict)
+                    and isinstance(value_data, dict)
+                    and previous.get("contract_id")
+                    == value.get("contract_id")
+                ):
+                    merged_data = {
+                        **previous_data,
+                        **value_data
+                    }
+
+                    merged = {
+                        **previous,
+                        **value,
+                        "data": merged_data
+                    }
+
+            self.latest["quote"] = merged
+
+        self._debug_print(
+            "quote",
+            merged
+        )
 
     def _normalize_single_event(self, args):
         if isinstance(args, list) and len(args) == 1:
@@ -235,8 +306,7 @@ class RealtimeService:
         # Live quote
         connection.on(
             "GatewayQuote",
-            lambda args: self._set_latest(
-                "quote",
+            lambda args: self._set_latest_quote(
                 self._normalize_market_event(args)
             )
         )
