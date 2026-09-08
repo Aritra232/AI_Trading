@@ -20,6 +20,7 @@ from service.market_status_service import MarketStatusService
 from service.audit_service import AuditService
 from service.bot_state_service import BotStateService
 from service.autonomous_bot_service import AutonomousBotService
+from service.trading_day_service import TradingDayService
 
 app = FastAPI(
     title="TopstepX API Test",
@@ -40,6 +41,10 @@ position_service = PositionService()
 order_service = OrderService()
 
 trade_service = TradeService()
+
+trading_day_service = TradingDayService(
+    trade_service=trade_service
+)
 
 realtime_service = RealtimeService(
     topstep_service=topstep_service
@@ -83,6 +88,7 @@ bot_service = BotService(
     decision_service=decision_service,
     safety_service=safety_service,
     execution_service=execution_service,
+    trading_day_service=trading_day_service,
     audit_service=audit_service,
     bot_state_service=bot_state_service
 )
@@ -356,6 +362,48 @@ async def get_trades(
         )
 
 
+@app.get(
+    "/topstep/trading-day/pnl",
+    tags=["Trades"]
+)
+async def get_current_trading_day_pnl(
+    account_id: int
+):
+    try:
+        return await trading_day_service.get_current_trading_day_pnl(
+            account_id=account_id
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.get(
+    "/topstep/evaluation/progress",
+    tags=["Rule Engine"]
+)
+async def get_evaluation_progress(
+    account_id: int,
+    evaluation_start_time: str | None = None,
+    lookback_days: int = 14
+):
+    try:
+        return await trading_day_service.get_evaluation_progress(
+            account_id=account_id,
+            evaluation_start_time=evaluation_start_time,
+            lookback_days=lookback_days
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
 # =========================
 # Realtime
 # =========================
@@ -458,6 +506,35 @@ async def get_trading_state(
 # =========================
 
 @app.get(
+    "/topstep/rules/pack",
+    tags=["Rule Engine"]
+)
+async def get_rule_pack(
+    account_size: int = 50000,
+    phase: str = "evaluation",
+    enforce_daily_profit_cap: bool = True
+):
+    try:
+        return {
+            "success": True,
+            "rule_pack": rule_service.get_rule_pack(
+                account_size=account_size,
+                phase=phase,
+                enforce_daily_profit_cap=(
+                    enforce_daily_profit_cap
+                )
+            ),
+            "rule_version": "TOPSTEP_RULE_PACK_V1"
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.get(
     "/topstep/rules/evaluate",
     tags=["Rule Engine"]
 )
@@ -467,7 +544,11 @@ async def evaluate_rules(
     symbol: str = "MES",
     planned_quantity: int = 1,
     current_mll: float | None = None,
-    best_day_profit: float | None = None
+    best_day_profit: float | None = None,
+    daily_pnl: float | None = None,
+    evaluation_trading_days: int | None = None,
+    phase: str = "evaluation",
+    enforce_daily_profit_cap: bool = True
 ):
     try:
         accounts_result = (
@@ -495,7 +576,15 @@ async def evaluate_rules(
             symbol=symbol,
             planned_quantity=planned_quantity,
             current_mll=current_mll,
-            best_day_profit=best_day_profit
+            best_day_profit=best_day_profit,
+            daily_pnl=daily_pnl,
+            evaluation_trading_days=(
+                evaluation_trading_days
+            ),
+            phase=phase,
+            enforce_daily_profit_cap=(
+                enforce_daily_profit_cap
+            )
         )
 
     except Exception as exc:
@@ -699,10 +788,18 @@ async def evaluate_final_decision(
 
     max_risk_per_trade: float | None = None,
 
+    daily_pnl: float | None = None,
+
+    evaluation_trading_days: int | None = None,
+
     start_time: str | None = None,
     end_time: str | None = None,
 
-    live: bool = False
+    live: bool = False,
+
+    phase: str = "evaluation",
+
+    enforce_daily_profit_cap: bool = True
 ):
     try:
 
@@ -835,6 +932,14 @@ async def evaluate_final_decision(
                 current_mll=current_mll,
                 best_day_profit=(
                     best_day_profit
+                ),
+                daily_pnl=daily_pnl,
+                phase=phase,
+                enforce_daily_profit_cap=(
+                    enforce_daily_profit_cap
+                ),
+                evaluation_trading_days=(
+                    evaluation_trading_days
                 )
             )
         )
@@ -945,6 +1050,58 @@ async def evaluate_final_decision(
 # =========================
 
 @app.post(
+    "/topstep/bot/run-auto",
+    tags=["Bot"]
+)
+async def run_bot_auto(
+    account_id: int,
+    symbol: str = "MES",
+    dry_run: bool = True,
+    live: bool = False,
+    phase: str = "evaluation"
+):
+    try:
+        return await bot_service.run_auto(
+            account_id=account_id,
+            symbol=symbol,
+            dry_run=dry_run,
+            live=live,
+            phase=phase
+        )
+
+    except Exception as exc:
+        bot_state_service.mark_run_failed(
+            error=exc,
+            context={
+                "account_id": account_id,
+                "symbol": symbol,
+                "dry_run": dry_run,
+                "live": live,
+                "phase": phase,
+                "auto_mode": True
+            }
+        )
+
+        audit_service.log_error(
+            event_type="BOT_AUTO_RUN_FAILED",
+            error=exc,
+            context={
+                "account_id": account_id,
+                "symbol": symbol,
+                "dry_run": dry_run,
+                "live": live,
+                "phase": phase,
+                "auto_mode": True
+            }
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.post(
     "/topstep/bot/run-once",
     tags=["Bot"]
 )
@@ -967,6 +1124,8 @@ async def run_bot_once(
 
     daily_pnl: float | None = None,
 
+    evaluation_trading_days: int | None = None,
+
     daily_loss_limit: float | None = None,
 
     max_position_quantity: int | None = None,
@@ -983,7 +1142,19 @@ async def run_bot_once(
 
     realtime_warmup_seconds: int = 3,
 
-    live: bool = False
+    live: bool = False,
+
+    duplicate_order_cooldown_seconds: int = 300,
+
+    phase: str = "evaluation",
+
+    enforce_daily_profit_cap: bool = True,
+
+    auto_calculate_evaluation_metrics: bool = True,
+
+    evaluation_start_time: str | None = None,
+
+    evaluation_lookback_days: int = 14
 ):
     try:
         return await bot_service.run_once(
@@ -996,6 +1167,9 @@ async def run_bot_once(
             best_day_profit=best_day_profit,
             max_risk_per_trade=max_risk_per_trade,
             daily_pnl=daily_pnl,
+            evaluation_trading_days=(
+                evaluation_trading_days
+            ),
             daily_loss_limit=daily_loss_limit,
             max_position_quantity=max_position_quantity,
             kill_switch=kill_switch,
@@ -1004,7 +1178,21 @@ async def run_bot_once(
             lookback_hours=lookback_hours,
             auto_start_realtime=auto_start_realtime,
             realtime_warmup_seconds=realtime_warmup_seconds,
-            live=live
+            live=live,
+            duplicate_order_cooldown_seconds=(
+                duplicate_order_cooldown_seconds
+            ),
+            phase=phase,
+            enforce_daily_profit_cap=(
+                enforce_daily_profit_cap
+            ),
+            auto_calculate_evaluation_metrics=(
+                auto_calculate_evaluation_metrics
+            ),
+            evaluation_start_time=evaluation_start_time,
+            evaluation_lookback_days=(
+                evaluation_lookback_days
+            )
         )
 
     except Exception as exc:
@@ -1014,7 +1202,12 @@ async def run_bot_once(
                 "account_id": account_id,
                 "symbol": symbol,
                 "dry_run": dry_run,
-                "live": live
+                "live": live,
+                "phase": phase,
+                "auto_calculate_evaluation_metrics": (
+                    auto_calculate_evaluation_metrics
+                ),
+                "evaluation_start_time": evaluation_start_time
             }
         )
 
@@ -1025,7 +1218,12 @@ async def run_bot_once(
                 "account_id": account_id,
                 "symbol": symbol,
                 "dry_run": dry_run,
-                "live": live
+                "live": live,
+                "phase": phase,
+                "auto_calculate_evaluation_metrics": (
+                    auto_calculate_evaluation_metrics
+                ),
+                "evaluation_start_time": evaluation_start_time
             }
         )
 
@@ -1044,6 +1242,49 @@ async def get_bot_status():
         return autonomous_bot_service.status()
 
     except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+@app.post(
+    "/topstep/bot/start-auto",
+    tags=["Bot"]
+)
+async def start_bot_auto(
+    account_id: int,
+    symbol: str = "MES",
+    dry_run: bool = True,
+    live: bool = False,
+    phase: str = "evaluation",
+    interval_seconds: int = 60
+):
+    try:
+        return await autonomous_bot_service.start_auto(
+            account_id=account_id,
+            symbol=symbol,
+            dry_run=dry_run,
+            live=live,
+            phase=phase,
+            interval_seconds=interval_seconds
+        )
+
+    except Exception as exc:
+        audit_service.log_error(
+            event_type="BOT_AUTO_START_FAILED",
+            error=exc,
+            context={
+                "account_id": account_id,
+                "symbol": symbol,
+                "dry_run": dry_run,
+                "live": live,
+                "phase": phase,
+                "interval_seconds": interval_seconds,
+                "auto_mode": True
+            }
+        )
 
         raise HTTPException(
             status_code=500,
@@ -1074,6 +1315,8 @@ async def start_bot(
 
     daily_pnl: float | None = None,
 
+    evaluation_trading_days: int | None = None,
+
     daily_loss_limit: float | None = None,
 
     max_position_quantity: int | None = None,
@@ -1090,7 +1333,19 @@ async def start_bot(
 
     live: bool = False,
 
-    interval_seconds: int = 60
+    interval_seconds: int = 60,
+
+    duplicate_order_cooldown_seconds: int = 300,
+
+    phase: str = "evaluation",
+
+    enforce_daily_profit_cap: bool = True,
+
+    auto_calculate_evaluation_metrics: bool = True,
+
+    evaluation_start_time: str | None = None,
+
+    evaluation_lookback_days: int = 14
 ):
     try:
         return await autonomous_bot_service.start(
@@ -1103,6 +1358,9 @@ async def start_bot(
             best_day_profit=best_day_profit,
             max_risk_per_trade=max_risk_per_trade,
             daily_pnl=daily_pnl,
+            evaluation_trading_days=(
+                evaluation_trading_days
+            ),
             daily_loss_limit=daily_loss_limit,
             max_position_quantity=max_position_quantity,
             max_quote_age_seconds=max_quote_age_seconds,
@@ -1111,7 +1369,21 @@ async def start_bot(
             auto_start_realtime=auto_start_realtime,
             realtime_warmup_seconds=realtime_warmup_seconds,
             live=live,
-            interval_seconds=interval_seconds
+            interval_seconds=interval_seconds,
+            duplicate_order_cooldown_seconds=(
+                duplicate_order_cooldown_seconds
+            ),
+            phase=phase,
+            enforce_daily_profit_cap=(
+                enforce_daily_profit_cap
+            ),
+            auto_calculate_evaluation_metrics=(
+                auto_calculate_evaluation_metrics
+            ),
+            evaluation_start_time=evaluation_start_time,
+            evaluation_lookback_days=(
+                evaluation_lookback_days
+            )
         )
 
     except Exception as exc:
@@ -1223,6 +1495,8 @@ async def dry_run_execution(
 
     daily_pnl: float | None = None,
 
+    evaluation_trading_days: int | None = None,
+
     daily_loss_limit: float | None = None,
 
     max_position_quantity: int | None = None,
@@ -1237,7 +1511,11 @@ async def dry_run_execution(
 
     end_time: str | None = None,
 
-    live: bool = False
+    live: bool = False,
+
+    phase: str = "evaluation",
+
+    enforce_daily_profit_cap: bool = True
 ):
     try:
         safety_workflow = await evaluate_safety(
@@ -1251,13 +1529,20 @@ async def dry_run_execution(
             best_day_profit=best_day_profit,
             max_risk_per_trade=max_risk_per_trade,
             daily_pnl=daily_pnl,
+            evaluation_trading_days=(
+                evaluation_trading_days
+            ),
             daily_loss_limit=daily_loss_limit,
             max_position_quantity=max_position_quantity,
             kill_switch=kill_switch,
             max_quote_age_seconds=max_quote_age_seconds,
             start_time=start_time,
             end_time=end_time,
-            live=live
+            live=live,
+            phase=phase,
+            enforce_daily_profit_cap=(
+                enforce_daily_profit_cap
+            )
         )
 
         final_decision = safety_workflow.get(
@@ -1352,6 +1637,8 @@ async def evaluate_safety(
 
     daily_pnl: float | None = None,
 
+    evaluation_trading_days: int | None = None,
+
     daily_loss_limit: float | None = None,
 
     max_position_quantity: int | None = None,
@@ -1364,7 +1651,11 @@ async def evaluate_safety(
 
     end_time: str | None = None,
 
-    live: bool = False
+    live: bool = False,
+
+    phase: str = "evaluation",
+
+    enforce_daily_profit_cap: bool = True
 ):
     try:
 
@@ -1559,6 +1850,14 @@ async def evaluate_safety(
                 ),
                 best_day_profit=(
                     best_day_profit
+                ),
+                daily_pnl=daily_pnl,
+                phase=phase,
+                enforce_daily_profit_cap=(
+                    enforce_daily_profit_cap
+                ),
+                evaluation_trading_days=(
+                    evaluation_trading_days
                 )
             )
         )

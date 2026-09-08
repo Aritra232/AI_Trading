@@ -78,6 +78,9 @@ class AuditService:
             "symbol": result.get(
                 "symbol"
             ),
+            "phase": result.get(
+                "phase"
+            ),
             "contract": {
                 "id": contract.get(
                     "id"
@@ -95,11 +98,23 @@ class AuditService:
             "decision": result.get(
                 "decision"
             ),
+            "rule": result.get(
+                "rule"
+            ),
+            "risk": result.get(
+                "risk"
+            ),
             "safety": result.get(
                 "safety"
             ),
             "ready_for_execution": result.get(
                 "ready_for_execution"
+            ),
+            "execution_guard": result.get(
+                "execution_guard"
+            ),
+            "evaluation_metrics": result.get(
+                "evaluation_metrics"
             ),
             "execution": {
                 "execution_status": execution.get(

@@ -60,6 +60,9 @@ class BotStateService:
                 "message": None,
                 "error": None
             },
+            "execution_guard": {
+                "recent_intents": []
+            },
             "created_at": now,
             "updated_at": now,
             "state_version": "BOT_STATE_V1"
@@ -113,7 +116,40 @@ class BotStateService:
             )
         }
 
+        merged["execution_guard"] = {
+            **default["execution_guard"],
+            **state.get(
+                "execution_guard",
+                {}
+            )
+        }
+
         return merged
+
+    def _parse_datetime(
+        self,
+        value: str | None
+    ) -> datetime | None:
+        if not value:
+            return None
+
+        try:
+            parsed = datetime.fromisoformat(
+                value.replace(
+                    "Z",
+                    "+00:00"
+                )
+            )
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(
+                    tzinfo=timezone.utc
+                )
+
+            return parsed
+
+        except Exception:
+            return None
 
     def _save(
         self,
@@ -335,6 +371,159 @@ class BotStateService:
             "error": str(
                 error
             )
+        }
+
+        return self._save(
+            state
+        )
+
+    def check_duplicate_order_intent(
+        self,
+        account_id: int,
+        contract_id: str,
+        action: str,
+        cooldown_seconds: int = 300
+    ) -> dict[str, Any]:
+        state = self._load()
+
+        action = str(
+            action
+        ).upper()
+
+        cooldown_seconds = max(
+            int(cooldown_seconds),
+            0
+        )
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        recent_intents = (
+            state.get(
+                "execution_guard",
+                {}
+            ).get(
+                "recent_intents",
+                []
+            )
+            or []
+        )
+
+        matching_intent = None
+
+        for intent in reversed(
+            recent_intents
+        ):
+            if (
+                intent.get(
+                    "account_id"
+                ) == account_id
+                and intent.get(
+                    "contract_id"
+                ) == contract_id
+                and str(
+                    intent.get(
+                        "action",
+                        ""
+                    )
+                ).upper() == action
+            ):
+                created_at = self._parse_datetime(
+                    intent.get(
+                        "created_at"
+                    )
+                )
+
+                if created_at is None:
+                    continue
+
+                age_seconds = max(
+                    (
+                        now
+                        - created_at
+                    ).total_seconds(),
+                    0
+                )
+
+                if age_seconds < cooldown_seconds:
+                    matching_intent = {
+                        **intent,
+                        "age_seconds": age_seconds,
+                        "remaining_cooldown_seconds": (
+                            cooldown_seconds
+                            - age_seconds
+                        )
+                    }
+
+                break
+
+        if matching_intent:
+            return {
+                "allowed": False,
+                "duplicate": True,
+                "reason": (
+                    f"Duplicate {action} order intent blocked "
+                    f"for account {account_id} and contract "
+                    f"{contract_id}. Cooldown "
+                    f"{cooldown_seconds}s has not expired."
+                ),
+                "cooldown_seconds": cooldown_seconds,
+                "matched_intent": matching_intent
+            }
+
+        return {
+            "allowed": True,
+            "duplicate": False,
+            "reason": None,
+            "cooldown_seconds": cooldown_seconds,
+            "matched_intent": None
+        }
+
+    def record_order_intent(
+        self,
+        account_id: int,
+        contract_id: str,
+        action: str,
+        dry_run: bool,
+        execution_status: str | None,
+        submitted: bool | None,
+        custom_tag: str | None = None
+    ) -> dict[str, Any]:
+        state = self._load()
+
+        recent_intents = (
+            state.get(
+                "execution_guard",
+                {}
+            ).get(
+                "recent_intents",
+                []
+            )
+            or []
+        )
+
+        recent_intents.append(
+            {
+                "account_id": account_id,
+                "contract_id": contract_id,
+                "action": str(
+                    action
+                ).upper(),
+                "dry_run": dry_run,
+                "execution_status": execution_status,
+                "submitted": submitted,
+                "custom_tag": custom_tag,
+                "created_at": self._utc_now_iso()
+            }
+        )
+
+        state["execution_guard"] = {
+            **state.get(
+                "execution_guard",
+                {}
+            ),
+            "recent_intents": recent_intents[-100:]
         }
 
         return self._save(
