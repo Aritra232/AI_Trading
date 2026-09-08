@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -24,6 +25,65 @@ class ExecutionService:
     ):
         self.order_service = order_service
         self.position_service = position_service
+
+    def _env_allows_live_trading(
+        self
+    ) -> bool:
+        return (
+            os.getenv(
+                "ALLOW_LIVE_TRADING",
+                ""
+            ).strip().lower()
+            == "true"
+        )
+
+    def _live_execution_block(
+        self,
+        prepared: dict,
+        confirm_live_execution: bool
+    ) -> dict | None:
+        env_allowed = self._env_allows_live_trading()
+
+        if (
+            env_allowed
+            and confirm_live_execution
+        ):
+            return None
+
+        missing = []
+
+        if not env_allowed:
+            missing.append(
+                "ALLOW_LIVE_TRADING=true"
+            )
+
+        if not confirm_live_execution:
+            missing.append(
+                "confirm_live_execution=true"
+            )
+
+        return {
+            **prepared,
+            "execution_status": "LIVE_EXECUTION_BLOCKED",
+            "submitted": False,
+            "dry_run": False,
+            "reason": (
+                "Live execution blocked. Required gate(s): "
+                + ", ".join(
+                    missing
+                )
+            ),
+            "live_execution_gate": {
+                "allow_live_trading_env": env_allowed,
+                "confirm_live_execution": (
+                    confirm_live_execution
+                ),
+                "allowed": False
+            },
+            "execution_version": (
+                "EXECUTION_LIVE_GUARD_V1"
+            )
+        }
 
     def _build_custom_tag(
         self,
@@ -449,7 +509,8 @@ class ExecutionService:
         safety_result: dict,
         contract: dict,
         dry_run: bool = True,
-        order_type: str = "MARKET"
+        order_type: str = "MARKET",
+        confirm_live_execution: bool = False
     ) -> dict:
         prepared = self.prepare_execution(
             account_id=account_id,
@@ -468,6 +529,16 @@ class ExecutionService:
             ) == "BLOCKED"
         ):
             return prepared
+
+        live_block = self._live_execution_block(
+            prepared=prepared,
+            confirm_live_execution=(
+                confirm_live_execution
+            )
+        )
+
+        if live_block is not None:
+            return live_block
 
         if prepared.get(
             "action"

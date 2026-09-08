@@ -49,6 +49,24 @@ Open Swagger:
 http://127.0.0.1:8000/docs
 ```
 
+## Live Execution Safety
+
+By default, real TopstepX order submission is blocked even if an endpoint is called with `dry_run=false`.
+
+To allow live order submission, both gates must be enabled:
+
+```env
+ALLOW_LIVE_TRADING=true
+```
+
+And the request must include:
+
+```text
+confirm_live_execution=true
+```
+
+If either gate is missing, the bot returns `LIVE_EXECUTION_BLOCKED` and no order is submitted.
+
 ## 4. Test in this order
 
 ### Health

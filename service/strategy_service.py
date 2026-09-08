@@ -72,6 +72,339 @@ class StrategyService:
         except Exception:
             return None
 
+    def _clamp_confidence(
+        self,
+        value
+    ):
+        confidence = self._to_float(
+            value
+        )
+
+        if confidence is None:
+            return 0.0
+
+        return max(
+            0.0,
+            min(
+                confidence,
+                1.0
+            )
+        )
+
+    def _normalize_choice(
+        self,
+        value,
+        allowed_values,
+        default
+    ):
+        normalized = str(
+            value or default
+        ).upper().strip()
+
+        if normalized not in allowed_values:
+            return default
+
+        return normalized
+
+    def _round_to_tick(
+        self,
+        value,
+        tick_size
+    ):
+        value = self._to_float(
+            value
+        )
+
+        tick_size = self._to_float(
+            tick_size
+        )
+
+        if value is None:
+            return None
+
+        if (
+            tick_size is None
+            or tick_size <= 0
+        ):
+            return value
+
+        return round(
+            round(
+                value / tick_size
+            )
+            * tick_size,
+            10
+        )
+
+    def _fail_closed_strategy(
+        self,
+        reason,
+        raw_output=None,
+        ai_used=True,
+        current_price=None,
+        current_price_source=None,
+        historical_bar_count=0
+    ):
+        result = {
+            "success": True,
+            "status": "BLOCK",
+            "action": "WAIT",
+            "reason": reason,
+            "ai_analysis": {
+                "confidence": 0.0,
+                "market_bias": "NEUTRAL",
+                "setup_valid": False,
+                "data_quality": "INSUFFICIENT",
+                "reason": reason
+            },
+            "trade_plan": {
+                "entry_price": None,
+                "stop_loss": None,
+                "take_profit": None
+            },
+            "market": {
+                "current_price": current_price,
+                "current_price_source": current_price_source,
+                "historical_bar_count": historical_bar_count
+            },
+            "strategy_version": (
+                "AI_AUTONOMOUS_V2"
+            ),
+            "model": self.model,
+            "ai_used": ai_used
+        }
+
+        if raw_output is not None:
+            result["raw_output"] = raw_output
+
+        return result
+
+    def _validate_ai_result(
+        self,
+        ai_result,
+        current_price,
+        current_price_source,
+        historical_bar_count,
+        contract
+    ):
+        if not isinstance(
+            ai_result,
+            dict
+        ):
+            return self._fail_closed_strategy(
+                reason="AI output was not a JSON object.",
+                current_price=current_price,
+                current_price_source=current_price_source,
+                historical_bar_count=historical_bar_count
+            )
+
+        action = self._normalize_choice(
+            ai_result.get(
+                "action"
+            ),
+            {
+                "BUY",
+                "SELL",
+                "WAIT",
+                "EXIT"
+            },
+            "WAIT"
+        )
+
+        market_bias = self._normalize_choice(
+            ai_result.get(
+                "market_bias"
+            ),
+            {
+                "BULLISH",
+                "BEARISH",
+                "NEUTRAL"
+            },
+            "NEUTRAL"
+        )
+
+        data_quality = self._normalize_choice(
+            ai_result.get(
+                "data_quality"
+            ),
+            {
+                "GOOD",
+                "LIMITED",
+                "INSUFFICIENT"
+            },
+            "INSUFFICIENT"
+        )
+
+        confidence = self._clamp_confidence(
+            ai_result.get(
+                "confidence"
+            )
+        )
+
+        setup_valid = bool(
+            ai_result.get(
+                "setup_valid",
+                False
+            )
+        )
+
+        reason = str(
+            ai_result.get(
+                "reason"
+            )
+            or "AI did not provide a reason."
+        ).strip()
+
+        if not reason:
+            reason = "AI did not provide a reason."
+
+        tick_size = contract.get(
+            "tickSize"
+        )
+
+        entry_price = self._round_to_tick(
+            ai_result.get(
+                "entry_price"
+            ),
+            tick_size
+        )
+
+        stop_loss = self._round_to_tick(
+            ai_result.get(
+                "stop_loss"
+            ),
+            tick_size
+        )
+
+        take_profit = self._round_to_tick(
+            ai_result.get(
+                "take_profit"
+            ),
+            tick_size
+        )
+
+        validation_errors = []
+
+        if action == "WAIT":
+            setup_valid = False
+            entry_price = None
+            stop_loss = None
+            take_profit = None
+
+        elif action == "EXIT":
+            setup_valid = False
+            entry_price = None
+            stop_loss = None
+            take_profit = None
+
+        elif action in {
+            "BUY",
+            "SELL"
+        }:
+            if not setup_valid:
+                validation_errors.append(
+                    "BUY/SELL requires setup_valid=true."
+                )
+
+            if confidence <= 0:
+                validation_errors.append(
+                    "BUY/SELL requires positive confidence."
+                )
+
+            if data_quality == "INSUFFICIENT":
+                validation_errors.append(
+                    "BUY/SELL is not allowed with insufficient data quality."
+                )
+
+            if (
+                entry_price is None
+                or stop_loss is None
+                or take_profit is None
+            ):
+                validation_errors.append(
+                    "BUY/SELL requires entry, stop-loss, and take-profit."
+                )
+
+            elif action == "BUY":
+                if stop_loss >= entry_price:
+                    validation_errors.append(
+                        "BUY stop-loss must be below entry."
+                    )
+
+                if take_profit <= entry_price:
+                    validation_errors.append(
+                        "BUY take-profit must be above entry."
+                    )
+
+            elif action == "SELL":
+                if stop_loss <= entry_price:
+                    validation_errors.append(
+                        "SELL stop-loss must be above entry."
+                    )
+
+                if take_profit >= entry_price:
+                    validation_errors.append(
+                        "SELL take-profit must be below entry."
+                    )
+
+        if validation_errors:
+            reason = (
+                "AI output failed validation: "
+                + "; ".join(
+                    validation_errors
+                )
+            )
+
+            return {
+                "success": True,
+                "status": "BLOCK",
+                "action": "WAIT",
+                "reason": reason,
+                "ai_analysis": {
+                    "confidence": confidence,
+                    "market_bias": market_bias,
+                    "setup_valid": False,
+                    "data_quality": data_quality,
+                    "reason": reason,
+                    "validation_errors": validation_errors
+                },
+                "trade_plan": {
+                    "entry_price": None,
+                    "stop_loss": None,
+                    "take_profit": None
+                },
+                "market": {
+                    "current_price": current_price,
+                    "current_price_source": current_price_source,
+                    "historical_bar_count": historical_bar_count
+                },
+                "strategy_version": (
+                    "AI_AUTONOMOUS_V2"
+                ),
+                "model": self.model,
+                "ai_used": True
+            }
+
+        return {
+            "action": action,
+            "confidence": confidence,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "reason": reason,
+            "market_bias": market_bias,
+            "setup_valid": setup_valid,
+            "data_quality": data_quality
+        }
+
+        try:
+            return float(
+                value
+            )
+
+        except Exception:
+            return None
+
     def _resolve_current_price(
         self,
         quote_data: dict
@@ -315,84 +648,58 @@ Return JSON only with this exact shape:
             )
 
         except json.JSONDecodeError:
-            return {
-                "success": True,
-                "status": "BLOCK",
-                "action": "WAIT",
-                "reason": (
+            return self._fail_closed_strategy(
+                reason=(
                     "AI returned invalid structured output."
                 ),
-                "raw_output": raw_output,
-                "ai_used": True
-            }
+                raw_output=raw_output,
+                ai_used=True,
+                current_price=current_price,
+                current_price_source=current_price_source,
+                historical_bar_count=len(
+                    historical_bars
+                )
+            )
 
         # =========================
         # Validate AI Output
         # =========================
 
-        allowed_actions = {
-            "BUY",
-            "SELL",
-            "WAIT",
-            "EXIT"
-        }
-
-        action = str(
-            result.get(
-                "action",
-                "WAIT"
-            )
-        ).upper()
-
-        if action not in allowed_actions:
-            action = "WAIT"
-
-        setup_valid = bool(
-            result.get(
-                "setup_valid",
-                False
-            )
+        validated_result = self._validate_ai_result(
+            ai_result=result,
+            current_price=current_price,
+            current_price_source=current_price_source,
+            historical_bar_count=len(
+                historical_bars
+            ),
+            contract=contract
         )
 
-        if (
-            action != "EXIT"
-            and not setup_valid
-        ):
-            action = "WAIT"
+        if validated_result.get(
+            "status"
+        ) == "BLOCK":
+            return validated_result
 
-        entry_price = result.get(
-            "entry_price"
-        )
-
-        stop_loss = result.get(
-            "stop_loss"
-        )
-
-        take_profit = result.get(
-            "take_profit"
-        )
-
-        # BUY / SELL must have risk levels
-        if action in {
-            "BUY",
-            "SELL"
-        }:
-            if (
-                entry_price is None
-                or stop_loss is None
-            ):
-                action = "WAIT"
+        action = validated_result[
+            "action"
+        ]
 
         # =========================
         # Duplicate Protection
         # =========================
 
         if open_orders:
-            action = "WAIT"
-
-            result["reason"] = (
-                "Existing open order detected. "
-                "Duplicate entry blocked."
+            return self._fail_closed_strategy(
+                reason=(
+                    "Existing open order detected. "
+                    "Duplicate entry blocked."
+                ),
+                ai_used=True,
+                current_price=current_price,
+                current_price_source=current_price_source,
+                historical_bar_count=len(
+                    historical_bars
+                )
             )
 
         # =========================
@@ -433,27 +740,33 @@ Return JSON only with this exact shape:
             },
 
             "ai_analysis": {
-                "confidence": result.get(
+                "confidence": validated_result.get(
                     "confidence"
                 ),
-                "market_bias": result.get(
+                "market_bias": validated_result.get(
                     "market_bias"
                 ),
-                "setup_valid": result.get(
+                "setup_valid": validated_result.get(
                     "setup_valid"
                 ),
-                "data_quality": result.get(
+                "data_quality": validated_result.get(
                     "data_quality"
                 ),
-                "reason": result.get(
+                "reason": validated_result.get(
                     "reason"
                 )
             },
 
             "trade_plan": {
-                "entry_price": entry_price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit
+                "entry_price": validated_result.get(
+                    "entry_price"
+                ),
+                "stop_loss": validated_result.get(
+                    "stop_loss"
+                ),
+                "take_profit": validated_result.get(
+                    "take_profit"
+                )
             },
 
             "safety_state": {
@@ -469,7 +782,7 @@ Return JSON only with this exact shape:
             },
 
             "strategy_version": (
-                "AI_AUTONOMOUS_V1"
+                "AI_AUTONOMOUS_V2"
             ),
 
             "model": self.model,

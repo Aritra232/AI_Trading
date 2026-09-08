@@ -73,7 +73,8 @@ class AutonomousBotService:
         enforce_daily_profit_cap: bool,
         auto_calculate_evaluation_metrics: bool,
         evaluation_start_time: str | None,
-        evaluation_lookback_days: int
+        evaluation_lookback_days: int,
+        confirm_live_execution: bool
     ) -> dict[str, Any]:
         return {
             "account_id": account_id,
@@ -104,7 +105,10 @@ class AutonomousBotService:
                 auto_calculate_evaluation_metrics
             ),
             "evaluation_start_time": evaluation_start_time,
-            "evaluation_lookback_days": evaluation_lookback_days
+            "evaluation_lookback_days": evaluation_lookback_days,
+            "confirm_live_execution": (
+                confirm_live_execution
+            )
         }
 
     async def _sleep_or_stop(
@@ -258,6 +262,12 @@ class AutonomousBotService:
                         config[
                             "evaluation_lookback_days"
                         ]
+                    ),
+                    confirm_live_execution=bool(
+                        config.get(
+                            "confirm_live_execution",
+                            False
+                        )
                     )
                 )
 
@@ -323,7 +333,8 @@ class AutonomousBotService:
         enforce_daily_profit_cap: bool = True,
         auto_calculate_evaluation_metrics: bool = True,
         evaluation_start_time: str | None = None,
-        evaluation_lookback_days: int = 14
+        evaluation_lookback_days: int = 14,
+        confirm_live_execution: bool = False
     ) -> dict[str, Any]:
         interval_seconds = max(
             int(interval_seconds),
@@ -369,7 +380,10 @@ class AutonomousBotService:
                 auto_calculate_evaluation_metrics
             ),
             evaluation_start_time=evaluation_start_time,
-            evaluation_lookback_days=evaluation_lookback_days
+            evaluation_lookback_days=evaluation_lookback_days,
+            confirm_live_execution=(
+                confirm_live_execution
+            )
         )
 
         self._config = config
@@ -397,7 +411,8 @@ class AutonomousBotService:
         dry_run: bool = True,
         live: bool = False,
         phase: str = "evaluation",
-        interval_seconds: int = 60
+        interval_seconds: int = 60,
+        confirm_live_execution: bool = False
     ) -> dict[str, Any]:
         account = await self.bot_service._resolve_account(
             account_id=account_id
@@ -411,6 +426,9 @@ class AutonomousBotService:
             account=account,
             account_size=account_size,
             phase=phase
+        )
+        auto_config["confirm_live_execution"] = (
+            confirm_live_execution
         )
 
         state = await self.start(
@@ -472,7 +490,10 @@ class AutonomousBotService:
             evaluation_start_time=None,
             evaluation_lookback_days=auto_config[
                 "evaluation_lookback_days"
-            ]
+            ],
+            confirm_live_execution=(
+                confirm_live_execution
+            )
         )
 
         return {
@@ -491,7 +512,9 @@ class AutonomousBotService:
 
             return {
                 **state,
-                "stopped": False,
+                "already_stopped": True,
+                "stop_requested": False,
+                "stopped": True,
                 "runtime_running": False,
                 "message": "Autonomous loop is already stopped."
             }
@@ -514,6 +537,8 @@ class AutonomousBotService:
         if self.is_running():
             return {
                 **self.bot_state_service.get_status(),
+                "already_stopped": False,
+                "stop_requested": True,
                 "stopped": False,
                 "runtime_running": True,
                 "message": (
@@ -528,6 +553,8 @@ class AutonomousBotService:
 
         return {
             **state,
+            "already_stopped": False,
+            "stop_requested": True,
             "stopped": True,
             "runtime_running": self.is_running(),
             "message": "Autonomous loop stop requested."

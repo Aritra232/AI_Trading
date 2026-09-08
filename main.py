@@ -1058,7 +1058,8 @@ async def run_bot_auto(
     symbol: str = "MES",
     dry_run: bool = True,
     live: bool = False,
-    phase: str = "evaluation"
+    phase: str = "evaluation",
+    confirm_live_execution: bool = False
 ):
     try:
         return await bot_service.run_auto(
@@ -1066,7 +1067,10 @@ async def run_bot_auto(
             symbol=symbol,
             dry_run=dry_run,
             live=live,
-            phase=phase
+            phase=phase,
+            confirm_live_execution=(
+                confirm_live_execution
+            )
         )
 
     except Exception as exc:
@@ -1078,6 +1082,9 @@ async def run_bot_auto(
                 "dry_run": dry_run,
                 "live": live,
                 "phase": phase,
+                "confirm_live_execution": (
+                    confirm_live_execution
+                ),
                 "auto_mode": True
             }
         )
@@ -1091,6 +1098,9 @@ async def run_bot_auto(
                 "dry_run": dry_run,
                 "live": live,
                 "phase": phase,
+                "confirm_live_execution": (
+                    confirm_live_execution
+                ),
                 "auto_mode": True
             }
         )
@@ -1154,7 +1164,9 @@ async def run_bot_once(
 
     evaluation_start_time: str | None = None,
 
-    evaluation_lookback_days: int = 14
+    evaluation_lookback_days: int = 14,
+
+    confirm_live_execution: bool = False
 ):
     try:
         return await bot_service.run_once(
@@ -1192,6 +1204,9 @@ async def run_bot_once(
             evaluation_start_time=evaluation_start_time,
             evaluation_lookback_days=(
                 evaluation_lookback_days
+            ),
+            confirm_live_execution=(
+                confirm_live_execution
             )
         )
 
@@ -1207,7 +1222,10 @@ async def run_bot_once(
                 "auto_calculate_evaluation_metrics": (
                     auto_calculate_evaluation_metrics
                 ),
-                "evaluation_start_time": evaluation_start_time
+                "evaluation_start_time": evaluation_start_time,
+                "confirm_live_execution": (
+                    confirm_live_execution
+                )
             }
         )
 
@@ -1223,7 +1241,10 @@ async def run_bot_once(
                 "auto_calculate_evaluation_metrics": (
                     auto_calculate_evaluation_metrics
                 ),
-                "evaluation_start_time": evaluation_start_time
+                "evaluation_start_time": evaluation_start_time,
+                "confirm_live_execution": (
+                    confirm_live_execution
+                )
             }
         )
 
@@ -1259,7 +1280,8 @@ async def start_bot_auto(
     dry_run: bool = True,
     live: bool = False,
     phase: str = "evaluation",
-    interval_seconds: int = 60
+    interval_seconds: int = 60,
+    confirm_live_execution: bool = False
 ):
     try:
         return await autonomous_bot_service.start_auto(
@@ -1268,7 +1290,10 @@ async def start_bot_auto(
             dry_run=dry_run,
             live=live,
             phase=phase,
-            interval_seconds=interval_seconds
+            interval_seconds=interval_seconds,
+            confirm_live_execution=(
+                confirm_live_execution
+            )
         )
 
     except Exception as exc:
@@ -1282,6 +1307,9 @@ async def start_bot_auto(
                 "live": live,
                 "phase": phase,
                 "interval_seconds": interval_seconds,
+                "confirm_live_execution": (
+                    confirm_live_execution
+                ),
                 "auto_mode": True
             }
         )
@@ -1345,7 +1373,9 @@ async def start_bot(
 
     evaluation_start_time: str | None = None,
 
-    evaluation_lookback_days: int = 14
+    evaluation_lookback_days: int = 14,
+
+    confirm_live_execution: bool = False
 ):
     try:
         return await autonomous_bot_service.start(
@@ -1383,6 +1413,9 @@ async def start_bot(
             evaluation_start_time=evaluation_start_time,
             evaluation_lookback_days=(
                 evaluation_lookback_days
+            ),
+            confirm_live_execution=(
+                confirm_live_execution
             )
         )
 

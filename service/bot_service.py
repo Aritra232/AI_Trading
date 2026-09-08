@@ -278,6 +278,85 @@ class BotService:
             "evaluation_lookback_days": 14
         }
 
+    def _build_pre_trade_rules(
+        self,
+        account: dict | None,
+        account_size: int,
+        symbol: str,
+        planned_quantity: int,
+        current_mll: float | None,
+        best_day_profit: float | None,
+        daily_pnl: float | None,
+        evaluation_trading_days: int | None,
+        phase: str,
+        enforce_daily_profit_cap: bool
+    ) -> dict:
+        if not account:
+            return {
+                "success": False,
+                "status": "UNKNOWN",
+                "reason": "Account state is unavailable."
+            }
+
+        rule_result = self.rule_service.evaluate_rules(
+            account=account,
+            account_size=account_size,
+            symbol=symbol,
+            planned_quantity=planned_quantity,
+            current_mll=current_mll,
+            best_day_profit=best_day_profit,
+            daily_pnl=daily_pnl,
+            evaluation_trading_days=(
+                evaluation_trading_days
+            ),
+            phase=phase,
+            enforce_daily_profit_cap=(
+                enforce_daily_profit_cap
+            )
+        )
+
+        return {
+            "success": True,
+            "status": rule_result.get(
+                "status"
+            ),
+            "phase": rule_result.get(
+                "phase"
+            ),
+            "account_size": rule_result.get(
+                "account_size"
+            ),
+            "symbol": rule_result.get(
+                "symbol"
+            ),
+            "account_state": rule_result.get(
+                "account_state"
+            ),
+            "profit_target": rule_result.get(
+                "profit_target"
+            ),
+            "evaluation_progress": rule_result.get(
+                "evaluation_progress"
+            ),
+            "daily_profit_cap": rule_result.get(
+                "daily_profit_cap"
+            ),
+            "maximum_loss_limit": rule_result.get(
+                "maximum_loss_limit"
+            ),
+            "position_limit": rule_result.get(
+                "position_limit"
+            ),
+            "violations": rule_result.get(
+                "violations",
+                []
+            ),
+            "warnings": rule_result.get(
+                "warnings",
+                []
+            )
+        }
+
     async def _run_decision_safety_workflow(
         self,
         account_id: int,
@@ -489,7 +568,8 @@ class BotService:
         enforce_daily_profit_cap: bool = True,
         auto_calculate_evaluation_metrics: bool = True,
         evaluation_start_time: str | None = None,
-        evaluation_lookback_days: int = 14
+        evaluation_lookback_days: int = 14,
+        confirm_live_execution: bool = False
     ):
         evaluation_metrics = None
 
@@ -580,7 +660,10 @@ class BotService:
                 auto_calculate_evaluation_metrics
             ),
             "evaluation_start_time": evaluation_start_time,
-            "evaluation_lookback_days": evaluation_lookback_days
+            "evaluation_lookback_days": evaluation_lookback_days,
+            "confirm_live_execution": (
+                confirm_live_execution
+            )
         }
 
         state_snapshot = None
@@ -772,7 +855,10 @@ class BotService:
             safety_result=safety,
             contract=contract,
             dry_run=dry_run,
-            order_type=order_type
+            order_type=order_type,
+            confirm_live_execution=(
+                confirm_live_execution
+            )
         )
 
         state = workflow.get(
@@ -790,12 +876,36 @@ class BotService:
             {}
         )
 
+        strategy_analysis = strategy.get(
+            "ai_analysis",
+            {}
+        )
+
         rule = workflow.get(
             "rule"
         )
 
         risk = workflow.get(
             "risk"
+        )
+
+        pre_trade_rules = self._build_pre_trade_rules(
+            account=state.get(
+                "account"
+            ),
+            account_size=account_size,
+            symbol=symbol,
+            planned_quantity=planned_quantity,
+            current_mll=current_mll,
+            best_day_profit=best_day_profit,
+            daily_pnl=daily_pnl,
+            evaluation_trading_days=(
+                evaluation_trading_days
+            ),
+            phase=phase,
+            enforce_daily_profit_cap=(
+                enforce_daily_profit_cap
+            )
         )
 
         execution_action = str(
@@ -913,6 +1023,22 @@ class BotService:
                 ).get(
                     "current_price_source"
                 ),
+                "confidence": strategy_analysis.get(
+                    "confidence"
+                ),
+                "market_bias": strategy_analysis.get(
+                    "market_bias"
+                ),
+                "setup_valid": strategy_analysis.get(
+                    "setup_valid"
+                ),
+                "data_quality": strategy_analysis.get(
+                    "data_quality"
+                ),
+                "validation_errors": strategy_analysis.get(
+                    "validation_errors",
+                    []
+                ),
                 "reason": (
                     strategy.get(
                         "reason"
@@ -923,6 +1049,12 @@ class BotService:
                     ).get(
                         "reason"
                     )
+                ),
+                "strategy_version": strategy.get(
+                    "strategy_version"
+                ),
+                "model": strategy.get(
+                    "model"
                 )
             },
             "decision": {
@@ -936,6 +1068,7 @@ class BotService:
                     "execution_allowed"
                 )
             },
+            "pre_trade_rules": pre_trade_rules,
             "rule": rule,
             "risk": risk,
             "safety": {
@@ -1025,7 +1158,8 @@ class BotService:
         symbol: str = "MES",
         dry_run: bool = True,
         live: bool = False,
-        phase: str = "evaluation"
+        phase: str = "evaluation",
+        confirm_live_execution: bool = False
     ):
         phase = str(
             phase
@@ -1043,6 +1177,9 @@ class BotService:
             account=account,
             account_size=account_size,
             phase=phase
+        )
+        auto_config["confirm_live_execution"] = (
+            confirm_live_execution
         )
 
         result = await self.run_once(
@@ -1104,7 +1241,10 @@ class BotService:
             evaluation_start_time=None,
             evaluation_lookback_days=auto_config[
                 "evaluation_lookback_days"
-            ]
+            ],
+            confirm_live_execution=(
+                confirm_live_execution
+            )
         )
 
         return {

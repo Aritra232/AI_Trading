@@ -98,6 +98,9 @@ class AuditService:
             "decision": result.get(
                 "decision"
             ),
+            "pre_trade_rules": result.get(
+                "pre_trade_rules"
+            ),
             "rule": result.get(
                 "rule"
             ),
@@ -146,6 +149,9 @@ class AuditService:
                 ),
                 "position_response": execution.get(
                     "position_response"
+                ),
+                "live_execution_gate": execution.get(
+                    "live_execution_gate"
                 ),
                 "execution_version": execution.get(
                     "execution_version"
