@@ -37,19 +37,11 @@ class ExecutionService:
             == "true"
         )
 
-    def _live_execution_block(
+    def live_gate_status(
         self,
-        prepared: dict,
-        confirm_live_execution: bool
-    ) -> dict | None:
+        confirm_live_execution: bool = False
+    ) -> dict:
         env_allowed = self._env_allows_live_trading()
-
-        if (
-            env_allowed
-            and confirm_live_execution
-        ):
-            return None
-
         missing = []
 
         if not env_allowed:
@@ -63,6 +55,39 @@ class ExecutionService:
             )
 
         return {
+            "allow_live_trading_env": env_allowed,
+            "confirm_live_execution": bool(
+                confirm_live_execution
+            ),
+            "allowed": (
+                env_allowed
+                and bool(
+                    confirm_live_execution
+                )
+            ),
+            "missing": missing
+        }
+
+    def _live_execution_block(
+        self,
+        prepared: dict,
+        confirm_live_execution: bool
+    ) -> dict | None:
+        gate = self.live_gate_status(
+            confirm_live_execution=confirm_live_execution
+        )
+        env_allowed = gate[
+            "allow_live_trading_env"
+        ]
+
+        if (
+            gate[
+                "allowed"
+            ]
+        ):
+            return None
+
+        return {
             **prepared,
             "execution_status": "LIVE_EXECUTION_BLOCKED",
             "submitted": False,
@@ -70,14 +95,13 @@ class ExecutionService:
             "reason": (
                 "Live execution blocked. Required gate(s): "
                 + ", ".join(
-                    missing
+                    gate[
+                        "missing"
+                    ]
                 )
             ),
             "live_execution_gate": {
-                "allow_live_trading_env": env_allowed,
-                "confirm_live_execution": (
-                    confirm_live_execution
-                ),
+                **gate,
                 "allowed": False
             },
             "execution_version": (

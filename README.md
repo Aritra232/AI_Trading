@@ -179,6 +179,41 @@ live=false
 
 This returns the active session, selected account, market status, bot status, rules/evaluation progress, trading-day PnL, open positions/orders, and the latest audit record.
 
+### Live Readiness
+
+Before any live order test, run the read-only live checklist:
+
+```text
+GET /topstep/live/readiness?session_id=...&account_id=26968948&symbol=MES
+```
+
+The response checks:
+
+```text
+session authentication
+account canTrade
+market quote freshness
+Topstep/evaluation rules
+kill switch
+live execution gates
+open positions
+open orders
+```
+
+For live execution to be ready, both gates must be enabled:
+
+```env
+ALLOW_LIVE_TRADING=true
+```
+
+and the request must include:
+
+```text
+confirm_live_execution=true
+```
+
+For the pilot, keep `require_flat_account=true` so live testing is blocked if any open position or working order already exists.
+
 ### Session Auth Test
 
 ```text

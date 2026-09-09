@@ -1103,6 +1103,372 @@ async def get_dashboard_summary(
 
 
 # =========================
+# Live Readiness
+# =========================
+
+@app.get(
+    "/topstep/live/readiness",
+    tags=["Execution Engine"]
+)
+async def get_live_readiness(
+    session_id: str,
+    account_id: int,
+    symbol: str = "MES",
+    phase: str = "evaluation",
+    account_size: int = 50000,
+    planned_quantity: int = 1,
+    live: bool = False,
+    confirm_live_execution: bool = False,
+    require_flat_account: bool = True,
+    auto_start_realtime: bool = True,
+    realtime_warmup_seconds: int = 1,
+    max_quote_age_seconds: int = 30,
+    lookback_hours: int = 72
+):
+    try:
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        session_status = topstep_session_service.status(
+            session_id=session_id
+        )
+
+        accounts_result = await runtime[
+            "account_service"
+        ].get_accounts()
+
+        selected_account = None
+
+        for account in accounts_result.get(
+            "accounts",
+            []
+        ):
+            if account.get(
+                "id"
+            ) == account_id:
+                selected_account = account
+                break
+
+        if selected_account is None:
+            raise ValueError(
+                f"Account {account_id} not found."
+            )
+
+        market_task = runtime[
+            "market_status_service"
+        ].get_status(
+            account_id=account_id,
+            symbol=symbol,
+            live=live,
+            auto_start_realtime=auto_start_realtime,
+            realtime_warmup_seconds=realtime_warmup_seconds,
+            max_quote_age_seconds=max_quote_age_seconds,
+            lookback_hours=lookback_hours
+        )
+
+        positions_task = runtime[
+            "position_service"
+        ].get_open_positions(
+            account_id=account_id
+        )
+
+        orders_task = runtime[
+            "order_service"
+        ].get_open_orders(
+            account_id=account_id
+        )
+
+        pnl_task = runtime[
+            "trading_day_service"
+        ].get_current_trading_day_pnl(
+            account_id=account_id
+        )
+
+        evaluation_task = runtime[
+            "trading_day_service"
+        ].get_evaluation_progress(
+            account_id=account_id,
+            evaluation_start_time=None,
+            lookback_days=14
+        )
+
+        (
+            market_status,
+            positions_result,
+            orders_result,
+            trading_day_pnl,
+            evaluation_progress
+        ) = await asyncio.gather(
+            _dashboard_section(
+                "market",
+                market_task
+            ),
+            _dashboard_section(
+                "positions",
+                positions_task
+            ),
+            _dashboard_section(
+                "orders",
+                orders_task
+            ),
+            _dashboard_section(
+                "trading_day",
+                pnl_task
+            ),
+            _dashboard_section(
+                "evaluation",
+                evaluation_task
+            )
+        )
+
+        rule_pack = rule_service.get_rule_pack(
+            account_size=account_size,
+            phase=phase,
+            enforce_daily_profit_cap=True
+        )
+
+        rules = rule_service.evaluate_rules(
+            account=selected_account,
+            account_size=account_size,
+            symbol=symbol,
+            planned_quantity=planned_quantity,
+            current_mll=rule_pack.get(
+                "maximum_loss_limit_floor"
+            ),
+            best_day_profit=evaluation_progress.get(
+                "best_day_profit"
+            ),
+            daily_pnl=trading_day_pnl.get(
+                "current_trading_day_pnl"
+            ),
+            evaluation_trading_days=evaluation_progress.get(
+                "evaluation_trading_days"
+            ),
+            phase=phase,
+            enforce_daily_profit_cap=True
+        )
+
+        bot_status = get_autonomous_service(
+            session_id=session_id,
+            runtime=runtime
+        ).status()
+
+        live_gate = runtime[
+            "bot_service"
+        ].execution_service.live_gate_status(
+            confirm_live_execution=confirm_live_execution
+        )
+
+        positions = positions_result.get(
+            "positions",
+            []
+        )
+        orders = orders_result.get(
+            "orders",
+            []
+        )
+
+        blocks = []
+        warnings = []
+
+        if not session_status.get(
+            "authenticated"
+        ):
+            blocks.append(
+                "Topstep session is not authenticated."
+            )
+
+        if not selected_account.get(
+            "canTrade",
+            False
+        ):
+            blocks.append(
+                "Topstep account is not allowed to trade."
+            )
+
+        if selected_account.get(
+            "simulated"
+        ):
+            warnings.append(
+                "Topstep account is marked simulated/evaluation."
+            )
+
+        if not market_status.get(
+            "tradable"
+        ):
+            blocks.extend(
+                market_status.get(
+                    "blocks",
+                    [
+                        "Market is not tradable."
+                    ]
+                )
+            )
+
+        if rules.get(
+            "status"
+        ) != "ALLOW":
+            blocks.extend(
+                rules.get(
+                    "violations",
+                    [
+                        "Topstep rule check failed."
+                    ]
+                )
+            )
+
+        if bot_status.get(
+            "kill_switch",
+            {}
+        ).get(
+            "enabled",
+            False
+        ):
+            blocks.append(
+                "Emergency kill switch is enabled."
+            )
+
+        if bot_status.get(
+            "loop",
+            {}
+        ).get(
+            "running",
+            False
+        ):
+            warnings.append(
+                "Autonomous bot loop is already running."
+            )
+
+        if not live_gate.get(
+            "allowed"
+        ):
+            blocks.append(
+                "Live execution gate is not fully enabled."
+            )
+
+        if (
+            require_flat_account
+            and positions
+        ):
+            blocks.append(
+                "Open positions exist; account must be flat."
+            )
+
+        if (
+            require_flat_account
+            and orders
+        ):
+            blocks.append(
+                "Open orders exist; cancel or resolve them first."
+            )
+
+        ready = len(
+            blocks
+        ) == 0
+
+        return {
+            "success": True,
+            "readiness_version": "LIVE_READINESS_V1",
+            "ready_for_live_execution": ready,
+            "status": (
+                "READY"
+                if ready
+                else "BLOCKED"
+            ),
+            "blocks": blocks,
+            "warnings": warnings,
+            "session": session_status,
+            "account": {
+                "id": selected_account.get(
+                    "id"
+                ),
+                "name": selected_account.get(
+                    "name"
+                ),
+                "balance": selected_account.get(
+                    "balance"
+                ),
+                "canTrade": selected_account.get(
+                    "canTrade"
+                ),
+                "simulated": selected_account.get(
+                    "simulated"
+                )
+            },
+            "symbol": symbol,
+            "phase": phase,
+            "market": market_status,
+            "rules": {
+                "status": rules.get(
+                    "status"
+                ),
+                "violations": rules.get(
+                    "violations",
+                    []
+                ),
+                "warnings": rules.get(
+                    "warnings",
+                    []
+                ),
+                "daily_profit_cap": rules.get(
+                    "daily_profit_cap"
+                ),
+                "profit_target": rules.get(
+                    "profit_target"
+                ),
+                "evaluation_progress": rules.get(
+                    "evaluation_progress"
+                ),
+                "maximum_loss_limit": rules.get(
+                    "maximum_loss_limit"
+                )
+            },
+            "live_gate": live_gate,
+            "bot": {
+                "bot_status": bot_status.get(
+                    "bot_status"
+                ),
+                "kill_switch": bot_status.get(
+                    "kill_switch"
+                ),
+                "last_run": bot_status.get(
+                    "last_run"
+                ),
+                "loop": bot_status.get(
+                    "loop"
+                )
+            },
+            "account_state": {
+                "require_flat_account": require_flat_account,
+                "positions_count": len(
+                    positions
+                ),
+                "orders_count": len(
+                    orders
+                ),
+                "positions": positions,
+                "orders": orders
+            },
+            "trading_day": trading_day_pnl,
+            "evaluation": evaluation_progress,
+            "next_step": (
+                "Live trading gate is ready. Use dry_run=false "
+                "and confirm_live_execution=true only when the "
+                "client approves live testing."
+                if ready
+                else "Resolve all blocks before live testing."
+            )
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+# =========================
 # Realtime
 # =========================
 
