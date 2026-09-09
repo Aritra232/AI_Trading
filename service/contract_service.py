@@ -2,8 +2,11 @@ from service.topstep_service import TopstepService
 
 
 class ContractService:
-    def __init__(self):
-        self.client = TopstepService()
+    def __init__(
+        self,
+        client: TopstepService | None = None
+    ):
+        self.client = client or TopstepService()
 
     async def search_contracts(
         self,

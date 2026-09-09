@@ -2,8 +2,11 @@ from service.topstep_service import TopstepService
 
 
 class HistoryService:
-    def __init__(self):
-        self.client = TopstepService()
+    def __init__(
+        self,
+        client: TopstepService | None = None
+    ):
+        self.client = client or TopstepService()
 
     def _normalize_bars(self, response: dict):
         bars = response.get(

@@ -17,7 +17,9 @@ class BotService:
         execution_service,
         trading_day_service=None,
         audit_service=None,
-        bot_state_service=None
+        bot_state_service=None,
+        session_id: str | None = None,
+        user_id: str | None = None
     ):
         self.contract_service = contract_service
         self.trading_state_service = trading_state_service
@@ -31,6 +33,8 @@ class BotService:
         self.trading_day_service = trading_day_service
         self.audit_service = audit_service
         self.bot_state_service = bot_state_service
+        self.session_id = session_id
+        self.user_id = user_id
 
     def _utc_now_iso(self):
         return datetime.now(
@@ -357,6 +361,73 @@ class BotService:
             )
         }
 
+    def _build_daily_profit_lock(
+        self,
+        pre_trade_rules: dict,
+        positions: list
+    ) -> dict:
+        daily_cap = (
+            pre_trade_rules
+            or {}
+        ).get(
+            "daily_profit_cap",
+            {}
+        )
+
+        cap_enabled = bool(
+            daily_cap.get(
+                "enabled",
+                False
+            )
+        )
+
+        cap_reached = bool(
+            daily_cap.get(
+                "reached",
+                False
+            )
+        )
+
+        position_count = len(
+            positions
+            or []
+        )
+
+        status = (
+            "DONE_FOR_DAY"
+            if cap_enabled
+            and cap_reached
+            else "ACTIVE"
+        )
+
+        return {
+            "enabled": cap_enabled,
+            "status": status,
+            "done_for_day": (
+                status == "DONE_FOR_DAY"
+            ),
+            "current_trading_day_pnl": daily_cap.get(
+                "current_trading_day_pnl"
+            ),
+            "cap": daily_cap.get(
+                "cap"
+            ),
+            "position_count": position_count,
+            "close_open_positions": (
+                status == "DONE_FOR_DAY"
+                and position_count > 0
+            ),
+            "reason": (
+                (
+                    "Trading-day profit cap reached. "
+                    "New entries are blocked and open "
+                    "positions must be closed."
+                )
+                if status == "DONE_FOR_DAY"
+                else None
+            )
+        }
+
     async def _run_decision_safety_workflow(
         self,
         account_id: int,
@@ -572,30 +643,44 @@ class BotService:
         confirm_live_execution: bool = False
     ):
         evaluation_metrics = None
+        normalized_phase = str(
+            phase
+        ).lower().strip()
 
         if (
             auto_calculate_evaluation_metrics
             and self.trading_day_service is not None
-            and str(
-                phase
-            ).lower().strip() == "evaluation"
             and (
                 daily_pnl is None
-                or best_day_profit is None
-                or evaluation_trading_days is None
+                or (
+                    normalized_phase == "evaluation"
+                    and (
+                        best_day_profit is None
+                        or evaluation_trading_days is None
+                    )
+                )
             )
         ):
             try:
-                evaluation_metrics = (
-                    await self.trading_day_service
-                    .get_evaluation_progress(
-                        account_id=account_id,
-                        evaluation_start_time=(
-                            evaluation_start_time
-                        ),
-                        lookback_days=evaluation_lookback_days
+                if normalized_phase == "evaluation":
+                    evaluation_metrics = (
+                        await self.trading_day_service
+                        .get_evaluation_progress(
+                            account_id=account_id,
+                            evaluation_start_time=(
+                                evaluation_start_time
+                            ),
+                            lookback_days=evaluation_lookback_days
+                        )
                     )
-                )
+
+                else:
+                    evaluation_metrics = (
+                        await self.trading_day_service
+                        .get_current_trading_day_pnl(
+                            account_id=account_id
+                        )
+                    )
 
             except Exception as exc:
                 evaluation_metrics = {
@@ -605,7 +690,7 @@ class BotService:
                     ),
                     "warnings": [
                         (
-                            "Evaluation metrics could not be "
+                            "Trading-day metrics could not be "
                             "auto-calculated."
                         )
                     ]
@@ -617,12 +702,18 @@ class BotService:
                         "current_trading_day_pnl"
                     )
 
-                if best_day_profit is None:
+                if (
+                    normalized_phase == "evaluation"
+                    and best_day_profit is None
+                ):
                     best_day_profit = evaluation_metrics.get(
                         "best_day_profit"
                     )
 
-                if evaluation_trading_days is None:
+                if (
+                    normalized_phase == "evaluation"
+                    and evaluation_trading_days is None
+                ):
                     evaluation_trading_days = (
                         evaluation_metrics.get(
                             "evaluation_trading_days"
@@ -630,6 +721,8 @@ class BotService:
                     )
 
         request_context = {
+            "user_id": self.user_id,
+            "session_id": self.session_id,
             "account_id": account_id,
             "symbol": symbol,
             "dry_run": dry_run,
@@ -765,102 +858,6 @@ class BotService:
             )
         )
 
-        final_decision = workflow.get(
-            "final_decision",
-            {}
-        )
-
-        safety = workflow.get(
-            "safety",
-            {}
-        )
-
-        execution_guard = None
-
-        action_for_guard = str(
-            final_decision.get(
-                "action",
-                "WAIT"
-            )
-        ).upper()
-
-        if (
-            self.bot_state_service is not None
-            and action_for_guard in {
-                "BUY",
-                "SELL"
-            }
-            and final_decision.get(
-                "execution_allowed",
-                False
-            )
-            and safety.get(
-                "safe_to_execute",
-                False
-            )
-        ):
-            execution_guard = (
-                self.bot_state_service
-                .check_duplicate_order_intent(
-                    account_id=account_id,
-                    contract_id=contract_id,
-                    action=action_for_guard,
-                    cooldown_seconds=(
-                        duplicate_order_cooldown_seconds
-                    )
-                )
-            )
-
-            if not execution_guard.get(
-                "allowed",
-                False
-            ):
-                guard_reason = execution_guard.get(
-                    "reason",
-                    "Duplicate order intent blocked."
-                )
-
-                safety_blocks = list(
-                    safety.get(
-                        "blocks",
-                        []
-                    )
-                )
-
-                safety_blocks.append(
-                    guard_reason
-                )
-
-                safety = {
-                    **safety,
-                    "safety_status": "BLOCK",
-                    "safe_to_execute": False,
-                    "blocks": safety_blocks
-                }
-
-                final_decision = {
-                    **final_decision,
-                    "execution_allowed": False,
-                    "duplicate_order_blocked": True
-                }
-
-                workflow["safety"] = safety
-                workflow["final_decision"] = final_decision
-                workflow["ready_for_execution"] = False
-
-        execution_result = await self.execution_service.execute(
-            account_id=account_id,
-            contract_id=contract_id,
-            final_decision=final_decision,
-            safety_result=safety,
-            contract=contract,
-            dry_run=dry_run,
-            order_type=order_type,
-            confirm_live_execution=(
-                confirm_live_execution
-            )
-        )
-
         state = workflow.get(
             "state",
             {}
@@ -889,6 +886,11 @@ class BotService:
             "risk"
         )
 
+        positions = state.get(
+            "positions",
+            []
+        )
+
         pre_trade_rules = self._build_pre_trade_rules(
             account=state.get(
                 "account"
@@ -907,6 +909,182 @@ class BotService:
                 enforce_daily_profit_cap
             )
         )
+
+        daily_profit_lock = self._build_daily_profit_lock(
+            pre_trade_rules=pre_trade_rules,
+            positions=positions
+        )
+
+        final_decision = workflow.get(
+            "final_decision",
+            {}
+        )
+
+        safety = workflow.get(
+            "safety",
+            {}
+        )
+
+        execution_guard = None
+
+        if daily_profit_lock.get(
+            "done_for_day"
+        ):
+            close_positions = bool(
+                daily_profit_lock.get(
+                    "close_open_positions"
+                )
+            )
+
+            final_decision = {
+                "success": True,
+                "final_status": "DONE_FOR_DAY",
+                "action": (
+                    "EXIT"
+                    if close_positions
+                    else "WAIT"
+                ),
+                "execution_allowed": close_positions,
+                "reason": daily_profit_lock.get(
+                    "reason"
+                ),
+                "decision_version": (
+                    "FINAL_DECISION_DAILY_PROFIT_LOCK_V1"
+                )
+            }
+
+            safety = {
+                "success": True,
+                "safety_status": (
+                    "PASS"
+                    if close_positions
+                    else "BLOCK"
+                ),
+                "safe_to_execute": close_positions,
+                "action": final_decision[
+                    "action"
+                ],
+                "blocks": (
+                    []
+                    if close_positions
+                    else [
+                        (
+                            "Trading-day profit cap reached "
+                            "and no open positions remain."
+                        )
+                    ]
+                ),
+                "warnings": [],
+                "safety_version": (
+                    "SAFETY_DAILY_PROFIT_LOCK_V1"
+                )
+            }
+
+            workflow["final_decision"] = final_decision
+            workflow["safety"] = safety
+            workflow["ready_for_execution"] = (
+                close_positions
+            )
+
+            execution_result = (
+                await self.execution_service.close_all_positions(
+                    account_id=account_id,
+                    positions=positions,
+                    dry_run=dry_run,
+                    confirm_live_execution=(
+                        confirm_live_execution
+                    ),
+                    reason=daily_profit_lock.get(
+                        "reason"
+                    )
+                )
+            )
+
+        else:
+
+            action_for_guard = str(
+                final_decision.get(
+                    "action",
+                    "WAIT"
+                )
+            ).upper()
+
+            if (
+                self.bot_state_service is not None
+                and action_for_guard in {
+                    "BUY",
+                    "SELL"
+                }
+                and final_decision.get(
+                    "execution_allowed",
+                    False
+                )
+                and safety.get(
+                    "safe_to_execute",
+                    False
+                )
+            ):
+                execution_guard = (
+                    self.bot_state_service
+                    .check_duplicate_order_intent(
+                        account_id=account_id,
+                        contract_id=contract_id,
+                        action=action_for_guard,
+                        cooldown_seconds=(
+                            duplicate_order_cooldown_seconds
+                        )
+                    )
+                )
+
+                if not execution_guard.get(
+                    "allowed",
+                    False
+                ):
+                    guard_reason = execution_guard.get(
+                        "reason",
+                        "Duplicate order intent blocked."
+                    )
+
+                    safety_blocks = list(
+                        safety.get(
+                            "blocks",
+                            []
+                        )
+                    )
+
+                    safety_blocks.append(
+                        guard_reason
+                    )
+
+                    safety = {
+                        **safety,
+                        "safety_status": "BLOCK",
+                        "safe_to_execute": False,
+                        "blocks": safety_blocks
+                    }
+
+                    final_decision = {
+                        **final_decision,
+                        "execution_allowed": False,
+                        "duplicate_order_blocked": True
+                    }
+
+                    workflow["safety"] = safety
+                    workflow["final_decision"] = final_decision
+                    workflow["ready_for_execution"] = False
+
+            execution_result = await self.execution_service.execute(
+                account_id=account_id,
+                contract_id=contract_id,
+                final_decision=final_decision,
+                safety_result=safety,
+                contract=contract,
+                dry_run=dry_run,
+                order_type=order_type,
+                confirm_live_execution=(
+                    confirm_live_execution
+                )
+            )
 
         execution_action = str(
             execution_result.get(
@@ -1069,6 +1247,7 @@ class BotService:
                 )
             },
             "pre_trade_rules": pre_trade_rules,
+            "daily_profit_lock": daily_profit_lock,
             "rule": rule,
             "risk": risk,
             "safety": {
@@ -1131,6 +1310,12 @@ class BotService:
                 ),
                 "state_file": state_update.get(
                     "state_file"
+                ),
+                "state_backend": state_update.get(
+                    "state_backend"
+                ),
+                "state_collection": state_update.get(
+                    "state_collection"
                 )
             }
 
@@ -1145,8 +1330,18 @@ class BotService:
                     "success",
                     False
                 ),
-                "log_file": audit.get(
-                    "log_file"
+                "stored": audit.get(
+                    "stored",
+                    False
+                ),
+                "collection": audit.get(
+                    "collection"
+                ),
+                "id": audit.get(
+                    "id"
+                ),
+                "error": audit.get(
+                    "error"
                 )
             }
 

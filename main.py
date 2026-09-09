@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+import asyncio
 
 from service.topstep_service import TopstepService
 from service.account_service import AccountService
@@ -19,8 +20,11 @@ from service.bot_service import BotService
 from service.market_status_service import MarketStatusService
 from service.audit_service import AuditService
 from service.bot_state_service import BotStateService
+from service.database_service import DatabaseService
+from service.db_bot_state_service import DbBotStateService
 from service.autonomous_bot_service import AutonomousBotService
 from service.trading_day_service import TradingDayService
+from service.topstep_session_service import TopstepSessionService
 
 app = FastAPI(
     title="TopstepX API Test",
@@ -74,9 +78,20 @@ execution_service = ExecutionService(
     position_service=position_service
 )
 
-audit_service = AuditService()
+database_service = DatabaseService()
+
+audit_service = AuditService(
+    database_service=database_service
+)
 
 bot_state_service = BotStateService()
+
+topstep_session_service = TopstepSessionService(
+    database_service=database_service
+)
+
+autonomous_services_by_session = {}
+bot_state_services_by_session = {}
 
 bot_service = BotService(
     contract_service=contract_service,
@@ -107,6 +122,212 @@ market_status_service = MarketStatusService(
 )
 
 
+def get_bot_state_service(
+    session_id: str | None
+):
+    if not session_id:
+        raise ValueError(
+            "session_id is required. "
+            "Please call /topstep/session/login first."
+        )
+
+    existing = bot_state_services_by_session.get(
+        session_id
+    )
+
+    if existing is not None:
+        return existing
+
+    session = topstep_session_service.get_session(
+        session_id
+    )
+
+    if database_service.is_enabled():
+        created = DbBotStateService(
+            database_service=database_service,
+            session_id=session_id,
+            user_id=(
+                session.get(
+                    "user_id"
+                )
+                if session
+                else None
+            )
+        )
+
+    else:
+        created = BotStateService(
+            filename=f"bot_state_{session_id}.json"
+        )
+
+    bot_state_services_by_session[
+        session_id
+    ] = created
+
+    return created
+
+
+def build_runtime(
+    session_id: str | None = None
+):
+    if not session_id:
+        raise ValueError(
+            "session_id is required. "
+            "Please call /topstep/session/login first."
+        )
+
+    client = topstep_session_service.get_client(
+        session_id
+    )
+
+    if client is None:
+        raise ValueError(
+            "Topstep session was not found. "
+            "Please authenticate again."
+        )
+
+    session = topstep_session_service.get_session(
+        session_id
+    )
+
+    runtime_account_service = AccountService(
+        client=client
+    )
+    runtime_contract_service = ContractService(
+        client=client
+    )
+    runtime_history_service = HistoryService(
+        client=client
+    )
+    runtime_position_service = PositionService(
+        client=client
+    )
+    runtime_order_service = OrderService(
+        client=client
+    )
+    runtime_trade_service = TradeService(
+        client=client
+    )
+
+    runtime_realtime_service = (
+        topstep_session_service.get_realtime_service(
+            session_id
+        )
+        if session_id
+        else realtime_service
+    )
+
+    if runtime_realtime_service is None:
+        runtime_realtime_service = RealtimeService(
+            topstep_service=client
+        )
+
+    runtime_trading_day_service = TradingDayService(
+        trade_service=runtime_trade_service
+    )
+
+    runtime_trading_state_service = TradingStateService(
+        account_service=runtime_account_service,
+        contract_service=runtime_contract_service,
+        history_service=runtime_history_service,
+        position_service=runtime_position_service,
+        order_service=runtime_order_service,
+        realtime_service=runtime_realtime_service
+    )
+
+    runtime_execution_service = ExecutionService(
+        order_service=runtime_order_service,
+        position_service=runtime_position_service
+    )
+
+    runtime_bot_state_service = get_bot_state_service(
+        session_id
+    )
+
+    runtime_bot_service = BotService(
+        contract_service=runtime_contract_service,
+        trading_state_service=runtime_trading_state_service,
+        realtime_service=runtime_realtime_service,
+        rule_service=rule_service,
+        risk_service=risk_service,
+        strategy_service=strategy_service,
+        decision_service=decision_service,
+        safety_service=safety_service,
+        execution_service=runtime_execution_service,
+        trading_day_service=runtime_trading_day_service,
+        audit_service=audit_service,
+        bot_state_service=runtime_bot_state_service,
+        session_id=session_id,
+        user_id=(
+            session.get(
+                "user_id"
+            )
+            if session
+            else None
+        )
+    )
+
+    runtime_market_status_service = MarketStatusService(
+        account_service=runtime_account_service,
+        contract_service=runtime_contract_service,
+        history_service=runtime_history_service,
+        realtime_service=runtime_realtime_service
+    )
+
+    return {
+        "account_service": runtime_account_service,
+        "contract_service": runtime_contract_service,
+        "history_service": runtime_history_service,
+        "position_service": runtime_position_service,
+        "order_service": runtime_order_service,
+        "trade_service": runtime_trade_service,
+        "trading_day_service": runtime_trading_day_service,
+        "trading_state_service": runtime_trading_state_service,
+        "realtime_service": runtime_realtime_service,
+        "bot_service": runtime_bot_service,
+        "market_status_service": runtime_market_status_service
+    }
+
+
+def get_autonomous_service(
+    session_id: str | None,
+    runtime: dict | None = None
+):
+    if not session_id:
+        raise ValueError(
+            "session_id is required. "
+            "Please call /topstep/session/login first."
+        )
+
+    existing = autonomous_services_by_session.get(
+        session_id
+    )
+
+    if existing is not None:
+        return existing
+
+    if runtime is None:
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+    created = AutonomousBotService(
+        bot_service=runtime[
+            "bot_service"
+        ],
+        bot_state_service=get_bot_state_service(
+            session_id
+        ),
+        audit_service=audit_service
+    )
+
+    autonomous_services_by_session[
+        session_id
+    ] = created
+
+    return created
+
+
 # =========================
 # System
 # =========================
@@ -121,12 +342,32 @@ def health():
     }
 
 
+@app.get(
+    "/topstep/database/health",
+    tags=["System"]
+)
+def database_health():
+    return database_service.health()
+
+
 @app.on_event(
     "shutdown"
 )
 async def shutdown_services():
     await autonomous_bot_service.stop()
+
+    for service in autonomous_services_by_session.values():
+        await service.stop()
+
     realtime_service.stop_all()
+
+    for session in topstep_session_service.sessions.values():
+        session_realtime_service = session.get(
+            "realtime_service"
+        )
+
+        if session_realtime_service is not None:
+            session_realtime_service.stop_all()
 
 
 # =========================
@@ -137,15 +378,27 @@ async def shutdown_services():
     "/topstep/auth-test",
     tags=["Authentication"]
 )
-async def auth_test():
+async def auth_test(
+    session_id: str
+):
     try:
-        result = await topstep_service.authenticate()
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        accounts_result = await runtime[
+            "account_service"
+        ].get_accounts()
 
         return {
             "success": True,
-            "message": "Authentication succeeded",
-            "token_received": bool(
-                result.get("token")
+            "message": "Session authentication succeeded.",
+            "session_id": session_id,
+            "account_count": len(
+                accounts_result.get(
+                    "accounts",
+                    []
+                )
             )
         }
 
@@ -156,6 +409,96 @@ async def auth_test():
         )
 
 
+@app.post(
+    "/topstep/session/login",
+    tags=["Authentication"]
+)
+async def login_topstep_session(
+    user_id: str,
+    topstep_username: str,
+    topstep_api_key: str
+):
+    try:
+        login_result = await topstep_session_service.login(
+            username=topstep_username,
+            api_key=topstep_api_key,
+            user_id=user_id
+        )
+
+        runtime = build_runtime(
+            session_id=login_result[
+                "session_id"
+            ]
+        )
+
+        accounts_result = (
+            await runtime[
+                "account_service"
+            ].get_accounts()
+        )
+
+        accounts = accounts_result.get(
+            "accounts",
+            []
+        )
+
+        accounts_database = topstep_session_service.save_accounts(
+            session_id=login_result[
+                "session_id"
+            ],
+            accounts=accounts
+        )
+
+        return {
+            **login_result,
+            "accounts": accounts,
+            "accounts_database": accounts_database
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=str(exc)
+        )
+
+
+@app.get(
+    "/topstep/session/status",
+    tags=["Authentication"]
+)
+async def topstep_session_status(
+    session_id: str | None = None
+):
+    return topstep_session_service.status(
+        session_id=session_id
+    )
+
+
+@app.post(
+    "/topstep/session/logout",
+    tags=["Authentication"]
+)
+async def logout_topstep_session(
+    session_id: str
+):
+    service = autonomous_services_by_session.pop(
+        session_id,
+        None
+    )
+
+    if service is not None:
+        await service.stop()
+
+    bot_state_services_by_session.pop(
+        session_id,
+        None
+    )
+
+    return topstep_session_service.logout(
+        session_id=session_id
+    )
+
+
 # =========================
 # Accounts
 # =========================
@@ -164,9 +507,30 @@ async def auth_test():
     "/topstep/accounts",
     tags=["Accounts"]
 )
-async def get_accounts():
+async def get_accounts(
+    session_id: str | None = None
+):
     try:
-        return await account_service.get_accounts()
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        accounts_result = await runtime[
+            "account_service"
+        ].get_accounts()
+
+        accounts_database = topstep_session_service.save_accounts(
+            session_id=session_id,
+            accounts=accounts_result.get(
+                "accounts",
+                []
+            )
+        )
+
+        return {
+            **accounts_result,
+            "accounts_database": accounts_database
+        }
 
     except Exception as exc:
         raise HTTPException(
@@ -185,10 +549,17 @@ async def get_accounts():
 )
 async def search_contracts(
     search_text: str = "MES",
-    live: bool = False
+    live: bool = False,
+    session_id: str | None = None
 ):
     try:
-        return await contract_service.search_contracts(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "contract_service"
+        ].search_contracts(
             search_text=search_text,
             live=live
         )
@@ -215,10 +586,17 @@ async def get_history(
     unit: int = 2,
     unit_number: int = 5,
     limit: int = 100,
-    live: bool = False
+    live: bool = False,
+    session_id: str | None = None
 ):
     try:
-        return await history_service.get_bars(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "history_service"
+        ].get_bars(
             contract_id=contract_id,
             start_time=start_time,
             end_time=end_time,
@@ -246,10 +624,17 @@ async def get_market_status(
     auto_start_realtime: bool = True,
     realtime_warmup_seconds: int = 3,
     max_quote_age_seconds: int = 30,
-    lookback_hours: int = 96
+    lookback_hours: int = 96,
+    session_id: str | None = None
 ):
     try:
-        return await market_status_service.get_status(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "market_status_service"
+        ].get_status(
             account_id=account_id,
             symbol=symbol,
             live=live,
@@ -275,10 +660,17 @@ async def get_market_status(
     tags=["Positions"]
 )
 async def get_positions(
-    account_id: int
+    account_id: int,
+    session_id: str | None = None
 ):
     try:
-        return await position_service.get_open_positions(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "position_service"
+        ].get_open_positions(
             account_id=account_id
         )
 
@@ -298,10 +690,17 @@ async def get_positions(
     tags=["Orders"]
 )
 async def get_open_orders(
-    account_id: int
+    account_id: int,
+    session_id: str | None = None
 ):
     try:
-        return await order_service.get_open_orders(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "order_service"
+        ].get_open_orders(
             account_id=account_id
         )
 
@@ -319,10 +718,17 @@ async def get_open_orders(
 async def get_orders(
     account_id: int,
     start_timestamp: str,
-    end_timestamp: str | None = None
+    end_timestamp: str | None = None,
+    session_id: str | None = None
 ):
     try:
-        return await order_service.get_orders(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "order_service"
+        ].get_orders(
             account_id=account_id,
             start_timestamp=start_timestamp,
             end_timestamp=end_timestamp
@@ -346,10 +752,17 @@ async def get_orders(
 async def get_trades(
     account_id: int,
     start_timestamp: str,
-    end_timestamp: str | None = None
+    end_timestamp: str | None = None,
+    session_id: str | None = None
 ):
     try:
-        return await trade_service.get_trades(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "trade_service"
+        ].get_trades(
             account_id=account_id,
             start_timestamp=start_timestamp,
             end_timestamp=end_timestamp
@@ -367,10 +780,17 @@ async def get_trades(
     tags=["Trades"]
 )
 async def get_current_trading_day_pnl(
-    account_id: int
+    account_id: int,
+    session_id: str | None = None
 ):
     try:
-        return await trading_day_service.get_current_trading_day_pnl(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "trading_day_service"
+        ].get_current_trading_day_pnl(
             account_id=account_id
         )
 
@@ -388,14 +808,292 @@ async def get_current_trading_day_pnl(
 async def get_evaluation_progress(
     account_id: int,
     evaluation_start_time: str | None = None,
-    lookback_days: int = 14
+    lookback_days: int = 14,
+    session_id: str | None = None
 ):
     try:
-        return await trading_day_service.get_evaluation_progress(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "trading_day_service"
+        ].get_evaluation_progress(
             account_id=account_id,
             evaluation_start_time=evaluation_start_time,
             lookback_days=lookback_days
         )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
+
+
+# =========================
+# Dashboard
+# =========================
+
+async def _dashboard_section(
+    name: str,
+    task
+):
+    try:
+        return await task
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "section": name,
+            "error": str(
+                exc
+            )
+        }
+
+
+@app.get(
+    "/topstep/dashboard/summary",
+    tags=["Dashboard"]
+)
+async def get_dashboard_summary(
+    session_id: str,
+    account_id: int,
+    symbol: str = "MES",
+    phase: str = "evaluation",
+    account_size: int = 50000,
+    planned_quantity: int = 1,
+    live: bool = False,
+    auto_start_realtime: bool = True,
+    realtime_warmup_seconds: int = 1,
+    max_quote_age_seconds: int = 30,
+    lookback_hours: int = 72,
+    audit_limit: int = 1
+):
+    try:
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        session_status = topstep_session_service.status(
+            session_id=session_id
+        )
+
+        accounts_result = await runtime[
+            "account_service"
+        ].get_accounts()
+
+        accounts = accounts_result.get(
+            "accounts",
+            []
+        )
+
+        selected_account = None
+
+        for account in accounts:
+            if account.get(
+                "id"
+            ) == account_id:
+                selected_account = account
+                break
+
+        if selected_account is None:
+            raise ValueError(
+                f"Account {account_id} not found."
+            )
+
+        user_id = session_status.get(
+            "user_id"
+        )
+
+        market_task = runtime[
+            "market_status_service"
+        ].get_status(
+            account_id=account_id,
+            symbol=symbol,
+            live=live,
+            auto_start_realtime=auto_start_realtime,
+            realtime_warmup_seconds=realtime_warmup_seconds,
+            max_quote_age_seconds=max_quote_age_seconds,
+            lookback_hours=lookback_hours
+        )
+
+        positions_task = runtime[
+            "position_service"
+        ].get_open_positions(
+            account_id=account_id
+        )
+
+        orders_task = runtime[
+            "order_service"
+        ].get_open_orders(
+            account_id=account_id
+        )
+
+        pnl_task = runtime[
+            "trading_day_service"
+        ].get_current_trading_day_pnl(
+            account_id=account_id
+        )
+
+        evaluation_task = runtime[
+            "trading_day_service"
+        ].get_evaluation_progress(
+            account_id=account_id,
+            evaluation_start_time=None,
+            lookback_days=14
+        )
+
+        (
+            market_status,
+            positions_result,
+            orders_result,
+            trading_day_pnl,
+            evaluation_progress
+        ) = await asyncio.gather(
+            _dashboard_section(
+                "market",
+                market_task
+            ),
+            _dashboard_section(
+                "positions",
+                positions_task
+            ),
+            _dashboard_section(
+                "orders",
+                orders_task
+            ),
+            _dashboard_section(
+                "trading_day",
+                pnl_task
+            ),
+            _dashboard_section(
+                "evaluation",
+                evaluation_task
+            )
+        )
+
+        rule_pack = rule_service.get_rule_pack(
+            account_size=account_size,
+            phase=phase,
+            enforce_daily_profit_cap=True
+        )
+
+        rules = rule_service.evaluate_rules(
+            account=selected_account,
+            account_size=account_size,
+            symbol=symbol,
+            planned_quantity=planned_quantity,
+            current_mll=rule_pack.get(
+                "maximum_loss_limit_floor"
+            ),
+            best_day_profit=evaluation_progress.get(
+                "best_day_profit"
+            ),
+            daily_pnl=trading_day_pnl.get(
+                "current_trading_day_pnl"
+            ),
+            evaluation_trading_days=evaluation_progress.get(
+                "evaluation_trading_days"
+            ),
+            phase=phase,
+            enforce_daily_profit_cap=True
+        )
+
+        bot_status = get_autonomous_service(
+            session_id=session_id,
+            runtime=runtime
+        ).status()
+
+        latest_audit = audit_service.read_recent(
+            limit=audit_limit,
+            session_id=session_id,
+            user_id=user_id,
+            account_id=account_id,
+            symbol=symbol
+        )
+
+        last_record = None
+
+        if latest_audit.get(
+            "records"
+        ):
+            last_record = latest_audit[
+                "records"
+            ][0]
+
+        dashboard_status = "READY"
+        blocks = []
+
+        if not session_status.get(
+            "authenticated"
+        ):
+            dashboard_status = "BLOCKED"
+            blocks.append(
+                "Topstep session is not authenticated."
+            )
+
+        if not market_status.get(
+            "tradable"
+        ):
+            dashboard_status = "BLOCKED"
+            blocks.extend(
+                market_status.get(
+                    "blocks",
+                    []
+                )
+            )
+
+        if rules.get(
+            "status"
+        ) != "ALLOW":
+            dashboard_status = "BLOCKED"
+            blocks.extend(
+                rules.get(
+                    "violations",
+                    []
+                )
+            )
+
+        kill_switch_enabled = bool(
+            bot_status.get(
+                "kill_switch",
+                {}
+            ).get(
+                "enabled",
+                False
+            )
+        )
+
+        if kill_switch_enabled:
+            dashboard_status = "BLOCKED"
+            blocks.append(
+                "Emergency kill switch is enabled."
+            )
+
+        return {
+            "success": True,
+            "summary_version": "DASHBOARD_SUMMARY_V1",
+            "dashboard_status": dashboard_status,
+            "blocks": blocks,
+            "session": session_status,
+            "account": selected_account,
+            "accounts": accounts,
+            "market": market_status,
+            "bot": bot_status,
+            "rules": rules,
+            "trading_day": trading_day_pnl,
+            "evaluation": evaluation_progress,
+            "positions": positions_result,
+            "orders": orders_result,
+            "latest_audit": {
+                "count": latest_audit.get(
+                    "count",
+                    0
+                ),
+                "record": last_record
+            }
+        }
 
     except Exception as exc:
         raise HTTPException(
@@ -413,10 +1111,17 @@ async def get_evaluation_progress(
     tags=["Realtime"]
 )
 async def start_user_realtime(
-    account_id: int
+    account_id: int,
+    session_id: str | None = None
 ):
     try:
-        return await realtime_service.start_user_hub(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "realtime_service"
+        ].start_user_hub(
             account_id=account_id
         )
 
@@ -432,10 +1137,17 @@ async def start_user_realtime(
     tags=["Realtime"]
 )
 async def start_market_realtime(
-    contract_id: str
+    contract_id: str,
+    session_id: str | None = None
 ):
     try:
-        return await realtime_service.start_market_hub(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "realtime_service"
+        ].start_market_hub(
             contract_id=contract_id
         )
 
@@ -450,16 +1162,32 @@ async def start_market_realtime(
     "/topstep/realtime/latest",
     tags=["Realtime"]
 )
-def get_latest_realtime_data():
-    return realtime_service.get_latest_data()
+def get_latest_realtime_data(
+    session_id: str | None = None
+):
+    runtime = build_runtime(
+        session_id=session_id
+    )
+
+    return runtime[
+        "realtime_service"
+    ].get_latest_data()
 
 
 @app.post(
     "/topstep/realtime/stop",
     tags=["Realtime"]
 )
-def stop_realtime():
-    return realtime_service.stop_all()
+def stop_realtime(
+    session_id: str | None = None
+):
+    runtime = build_runtime(
+        session_id=session_id
+    )
+
+    return runtime[
+        "realtime_service"
+    ].stop_all()
 
 
 # =========================
@@ -479,10 +1207,17 @@ async def get_trading_state(
     end_time: str | None = None,
     unit: int = 2,
     unit_number: int = 5,
-    limit: int = 100
+    limit: int = 100,
+    session_id: str | None = None
 ):
     try:
-        return await trading_state_service.get_trading_state(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "trading_state_service"
+        ].get_trading_state(
             account_id=account_id,
             contract_id=contract_id,
             search_text=search_text,
@@ -548,11 +1283,18 @@ async def evaluate_rules(
     daily_pnl: float | None = None,
     evaluation_trading_days: int | None = None,
     phase: str = "evaluation",
-    enforce_daily_profit_cap: bool = True
+    enforce_daily_profit_cap: bool = True,
+    session_id: str | None = None
 ):
     try:
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
         accounts_result = (
-            await account_service.get_accounts()
+            await runtime[
+                "account_service"
+            ].get_accounts()
         )
 
         selected_account = None
@@ -611,15 +1353,22 @@ async def evaluate_risk(
     planned_quantity: int = 1,
     current_mll: float | None = None,
     max_risk_per_trade: float | None = None,
-    live: bool = False
+    live: bool = False,
+    session_id: str | None = None
 ):
     try:
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
         # =========================
         # Fetch Account
         # =========================
 
         accounts_result = (
-            await account_service.get_accounts()
+            await runtime[
+                "account_service"
+            ].get_accounts()
         )
 
         selected_account = None
@@ -642,7 +1391,9 @@ async def evaluate_risk(
         # =========================
 
         contracts_result = (
-            await contract_service.search_contracts(
+            await runtime[
+                "contract_service"
+            ].search_contracts(
                 search_text=search_text,
                 live=live
             )
@@ -699,11 +1450,17 @@ async def evaluate_strategy(
     search_text: str = "MES",
     start_time: str | None = None,
     end_time: str | None = None,
-    live: bool = False
+    live: bool = False,
+    session_id: str | None = None
 ):
     try:
+        runtime = build_runtime(
+            session_id=session_id
+        )
 
-        state = await trading_state_service.get_trading_state(
+        state = await runtime[
+            "trading_state_service"
+        ].get_trading_state(
             account_id=account_id,
             contract_id=contract_id,
             search_text=search_text,
@@ -799,16 +1556,23 @@ async def evaluate_final_decision(
 
     phase: str = "evaluation",
 
-    enforce_daily_profit_cap: bool = True
+    enforce_daily_profit_cap: bool = True,
+
+    session_id: str | None = None
 ):
     try:
+        runtime = build_runtime(
+            session_id=session_id
+        )
 
         # =========================
         # 1. Get Trading State
         # =========================
 
         state = (
-            await trading_state_service.get_trading_state(
+            await runtime[
+                "trading_state_service"
+            ].get_trading_state(
                 account_id=account_id,
                 contract_id=contract_id,
                 search_text=search_text,
@@ -1059,10 +1823,17 @@ async def run_bot_auto(
     dry_run: bool = True,
     live: bool = False,
     phase: str = "evaluation",
-    confirm_live_execution: bool = False
+    confirm_live_execution: bool = False,
+    session_id: str | None = None
 ):
     try:
-        return await bot_service.run_auto(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "bot_service"
+        ].run_auto(
             account_id=account_id,
             symbol=symbol,
             dry_run=dry_run,
@@ -1082,6 +1853,7 @@ async def run_bot_auto(
                 "dry_run": dry_run,
                 "live": live,
                 "phase": phase,
+                "session_id": session_id,
                 "confirm_live_execution": (
                     confirm_live_execution
                 ),
@@ -1098,6 +1870,7 @@ async def run_bot_auto(
                 "dry_run": dry_run,
                 "live": live,
                 "phase": phase,
+                "session_id": session_id,
                 "confirm_live_execution": (
                     confirm_live_execution
                 ),
@@ -1166,10 +1939,18 @@ async def run_bot_once(
 
     evaluation_lookback_days: int = 14,
 
-    confirm_live_execution: bool = False
+    confirm_live_execution: bool = False,
+
+    session_id: str | None = None
 ):
     try:
-        return await bot_service.run_once(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        return await runtime[
+            "bot_service"
+        ].run_once(
             account_id=account_id,
             account_size=account_size,
             symbol=symbol,
@@ -1219,6 +2000,7 @@ async def run_bot_once(
                 "dry_run": dry_run,
                 "live": live,
                 "phase": phase,
+                "session_id": session_id,
                 "auto_calculate_evaluation_metrics": (
                     auto_calculate_evaluation_metrics
                 ),
@@ -1238,6 +2020,7 @@ async def run_bot_once(
                 "dry_run": dry_run,
                 "live": live,
                 "phase": phase,
+                "session_id": session_id,
                 "auto_calculate_evaluation_metrics": (
                     auto_calculate_evaluation_metrics
                 ),
@@ -1258,9 +2041,15 @@ async def run_bot_once(
     "/topstep/bot/status",
     tags=["Bot"]
 )
-async def get_bot_status():
+async def get_bot_status(
+    session_id: str | None = None
+):
     try:
-        return autonomous_bot_service.status()
+        service = get_autonomous_service(
+            session_id=session_id
+        )
+
+        return service.status()
 
     except Exception as exc:
 
@@ -1281,10 +2070,20 @@ async def start_bot_auto(
     live: bool = False,
     phase: str = "evaluation",
     interval_seconds: int = 60,
-    confirm_live_execution: bool = False
+    confirm_live_execution: bool = False,
+    session_id: str | None = None
 ):
     try:
-        return await autonomous_bot_service.start_auto(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        runtime_autonomous_bot_service = get_autonomous_service(
+            session_id=session_id,
+            runtime=runtime
+        )
+
+        return await runtime_autonomous_bot_service.start_auto(
             account_id=account_id,
             symbol=symbol,
             dry_run=dry_run,
@@ -1307,6 +2106,7 @@ async def start_bot_auto(
                 "live": live,
                 "phase": phase,
                 "interval_seconds": interval_seconds,
+                "session_id": session_id,
                 "confirm_live_execution": (
                     confirm_live_execution
                 ),
@@ -1375,10 +2175,21 @@ async def start_bot(
 
     evaluation_lookback_days: int = 14,
 
-    confirm_live_execution: bool = False
+    confirm_live_execution: bool = False,
+
+    session_id: str | None = None
 ):
     try:
-        return await autonomous_bot_service.start(
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
+        runtime_autonomous_bot_service = get_autonomous_service(
+            session_id=session_id,
+            runtime=runtime
+        )
+
+        return await runtime_autonomous_bot_service.start(
             account_id=account_id,
             account_size=account_size,
             symbol=symbol,
@@ -1431,9 +2242,15 @@ async def start_bot(
     "/topstep/bot/stop",
     tags=["Bot"]
 )
-async def stop_bot():
+async def stop_bot(
+    session_id: str | None = None
+):
     try:
-        return await autonomous_bot_service.stop()
+        service = get_autonomous_service(
+            session_id=session_id
+        )
+
+        return await service.stop()
 
     except Exception as exc:
 
@@ -1490,11 +2307,21 @@ async def disable_bot_kill_switch(
     tags=["Audit"]
 )
 async def get_recent_audit_logs(
-    limit: int = 50
+    limit: int = 50,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    account_id: int | None = None,
+    symbol: str | None = None,
+    event_type: str | None = None
 ):
     try:
         return audit_service.read_recent(
-            limit=limit
+            limit=limit,
+            session_id=session_id,
+            user_id=user_id,
+            account_id=account_id,
+            symbol=symbol,
+            event_type=event_type
         )
 
     except Exception as exc:
@@ -1548,9 +2375,15 @@ async def dry_run_execution(
 
     phase: str = "evaluation",
 
-    enforce_daily_profit_cap: bool = True
+    enforce_daily_profit_cap: bool = True,
+
+    session_id: str | None = None
 ):
     try:
+        runtime = build_runtime(
+            session_id=session_id
+        )
+
         safety_workflow = await evaluate_safety(
             account_id=account_id,
             contract_id=contract_id,
@@ -1575,7 +2408,8 @@ async def dry_run_execution(
             phase=phase,
             enforce_daily_profit_cap=(
                 enforce_daily_profit_cap
-            )
+            ),
+            session_id=session_id
         )
 
         final_decision = safety_workflow.get(
@@ -1587,7 +2421,9 @@ async def dry_run_execution(
             safety_workflow
         )
 
-        state = await trading_state_service.get_trading_state(
+        state = await runtime[
+            "trading_state_service"
+        ].get_trading_state(
             account_id=account_id,
             contract_id=contract_id,
             search_text=search_text,
@@ -1606,7 +2442,9 @@ async def dry_run_execution(
             )
 
         execution_result = (
-            execution_service.prepare_execution(
+            runtime[
+                "bot_service"
+            ].execution_service.prepare_execution(
                 account_id=account_id,
                 contract_id=contract_id,
                 final_decision=final_decision,
@@ -1688,16 +2526,23 @@ async def evaluate_safety(
 
     phase: str = "evaluation",
 
-    enforce_daily_profit_cap: bool = True
+    enforce_daily_profit_cap: bool = True,
+
+    session_id: str | None = None
 ):
     try:
+        runtime = build_runtime(
+            session_id=session_id
+        )
 
         # =========================
         # 1. Trading State
         # =========================
 
         state = (
-            await trading_state_service.get_trading_state(
+            await runtime[
+                "trading_state_service"
+            ].get_trading_state(
                 account_id=account_id,
                 contract_id=contract_id,
                 search_text=search_text,

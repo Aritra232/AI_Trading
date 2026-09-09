@@ -108,6 +108,92 @@ class ExecutionService:
             f"{action.lower()}_{timestamp}"
         )
 
+    def _extract_position_contract_id(
+        self,
+        position: dict
+    ) -> Optional[str]:
+        for key in (
+            "contractId",
+            "contract_id",
+            "contractID",
+            "symbolId"
+        ):
+            value = position.get(
+                key
+            )
+
+            if value:
+                return str(
+                    value
+                )
+
+        contract = position.get(
+            "contract"
+        )
+
+        if isinstance(
+            contract,
+            dict
+        ):
+            value = (
+                contract.get(
+                    "id"
+                )
+                or contract.get(
+                    "contractId"
+                )
+            )
+
+            if value:
+                return str(
+                    value
+                )
+
+        return None
+
+    def _build_close_all_payloads(
+        self,
+        account_id: int,
+        positions: list
+    ) -> list[dict]:
+        contract_ids = []
+        seen = set()
+
+        for position in positions or []:
+            contract_id = self._extract_position_contract_id(
+                position
+            )
+
+            if (
+                not contract_id
+                or contract_id in seen
+            ):
+                continue
+
+            seen.add(
+                contract_id
+            )
+            contract_ids.append(
+                contract_id
+            )
+
+        payloads = []
+
+        for contract_id in contract_ids:
+            payloads.append(
+                {
+                    "accountId": account_id,
+                    "contractId": contract_id,
+                    "customTag": self._build_custom_tag(
+                        account_id=account_id,
+                        contract_id=contract_id,
+                        action="EXIT"
+                    )
+                }
+            )
+
+        return payloads
+
     def _ticks_between(
         self,
         price_a: Optional[float],
@@ -629,6 +715,137 @@ class ExecutionService:
                 else "ProjectX rejected the order."
             ),
             "order_response": order_response,
+            "execution_version": (
+                "EXECUTION_LIVE_V1"
+            )
+        }
+
+    async def close_all_positions(
+        self,
+        account_id: int,
+        positions: list,
+        dry_run: bool = True,
+        confirm_live_execution: bool = False,
+        reason: str | None = None
+    ) -> dict:
+        payloads = self._build_close_all_payloads(
+            account_id=account_id,
+            positions=positions
+        )
+
+        if not payloads:
+            return {
+                "success": True,
+                "execution_status": "DONE_FOR_DAY_NO_POSITION",
+                "submitted": False,
+                "dry_run": dry_run,
+                "reason": (
+                    reason
+                    or "No open positions found to close."
+                ),
+                "action": "WAIT",
+                "close_payloads": [],
+                "position_response": None,
+                "execution_version": (
+                    "EXECUTION_DONE_FOR_DAY_V1"
+                )
+            }
+
+        prepared = {
+            "success": True,
+            "submitted": False,
+            "action": "EXIT",
+            "close_payloads": payloads,
+            "reason": (
+                reason
+                or "Daily profit cap reached; closing all open positions."
+            ),
+            "dry_run": dry_run,
+            "execution_version": "EXECUTION_DRY_RUN_V1"
+        }
+
+        if dry_run:
+            return {
+                **prepared,
+                "execution_status": "DRY_RUN_CLOSE_ALL_READY",
+                "message": (
+                    "Close-all-position requests prepared "
+                    "but not submitted."
+                )
+            }
+
+        live_block = self._live_execution_block(
+            prepared=prepared,
+            confirm_live_execution=(
+                confirm_live_execution
+            )
+        )
+
+        if live_block is not None:
+            return live_block
+
+        if self.position_service is None:
+            return {
+                **prepared,
+                "execution_status": "BLOCKED",
+                "submitted": False,
+                "reason": (
+                    "Position service is not configured."
+                ),
+                "execution_version": (
+                    "EXECUTION_LIVE_V1"
+                )
+            }
+
+        responses = []
+
+        for payload in payloads:
+            response = (
+                await self.position_service.close_contract_position(
+                    account_id=account_id,
+                    contract_id=payload[
+                        "contractId"
+                    ]
+                )
+            )
+
+            responses.append(
+                {
+                    "contractId": payload[
+                        "contractId"
+                    ],
+                    "response": response
+                }
+            )
+
+        submitted = all(
+            bool(
+                item.get(
+                    "response",
+                    {}
+                ).get(
+                    "success",
+                    False
+                )
+            )
+            for item in responses
+        )
+
+        return {
+            **prepared,
+            "execution_status": (
+                "CLOSE_ALL_SUBMITTED"
+                if submitted
+                else "CLOSE_ALL_PARTIAL_OR_REJECTED"
+            ),
+            "dry_run": False,
+            "submitted": submitted,
+            "message": (
+                "Close-all-position requests submitted to ProjectX."
+                if submitted
+                else "One or more close-position requests failed."
+            ),
+            "position_responses": responses,
             "execution_version": (
                 "EXECUTION_LIVE_V1"
             )

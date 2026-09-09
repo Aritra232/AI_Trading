@@ -14,7 +14,7 @@ class RuleService:
                 "max_mini_contracts": 5,
                 "max_micro_contracts": 50,
                 "consistency_target_percent": 50,
-                "evaluation_daily_profit_cap": 1000,
+                "evaluation_daily_profit_cap": 1020,
                 "evaluation_minimum_trading_days": 3,
                 "evaluation_maximum_trading_days": 10
             },
@@ -28,7 +28,7 @@ class RuleService:
                 "max_mini_contracts": 10,
                 "max_micro_contracts": 100,
                 "consistency_target_percent": 50,
-                "evaluation_daily_profit_cap": 1000,
+                "evaluation_daily_profit_cap": 1020,
                 "evaluation_minimum_trading_days": 3,
                 "evaluation_maximum_trading_days": 10
             },
@@ -42,7 +42,7 @@ class RuleService:
                 "max_mini_contracts": 15,
                 "max_micro_contracts": 150,
                 "consistency_target_percent": 50,
-                "evaluation_daily_profit_cap": 1000,
+                "evaluation_daily_profit_cap": 1020,
                 "evaluation_minimum_trading_days": 3,
                 "evaluation_maximum_trading_days": 10
             }
@@ -89,21 +89,24 @@ class RuleService:
             "trading_day_end": "15:10 CT next calendar day",
             "daily_profit_cap_enabled": (
                 bool(enforce_daily_profit_cap)
-                and phase == "evaluation"
+                and phase in {
+                    "evaluation",
+                    "payout"
+                }
             ),
             "daily_profit_cap": (
                 base_rules[
                     "evaluation_daily_profit_cap"
                 ]
-                if phase == "evaluation"
+                if phase in {
+                    "evaluation",
+                    "payout"
+                }
                 else None
             )
         }
 
-        if phase in {
-            "funded",
-            "payout"
-        }:
+        if phase == "funded":
             rules["daily_profit_cap_enabled"] = False
             rules["daily_profit_cap"] = None
 
@@ -318,9 +321,10 @@ class RuleService:
                 if daily_profit_cap_reached:
                     violations.append(
                         (
-                            "Evaluation trading-day profit cap "
+                            "Trading-day profit cap "
                             f"${daily_profit_cap:.2f} has been "
-                            "reached. New entries are blocked."
+                            "reached. New entries are blocked "
+                            "and open positions must be closed."
                         )
                     )
 
