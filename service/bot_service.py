@@ -44,6 +44,202 @@ class BotService:
             "Z"
         )
 
+    def _parse_datetime(
+        self,
+        value: str | None
+    ):
+        if not value:
+            return None
+
+        try:
+            parsed = datetime.fromisoformat(
+                value.replace(
+                    "Z",
+                    "+00:00"
+                )
+            )
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(
+                    tzinfo=timezone.utc
+                )
+
+            return parsed
+
+        except Exception:
+            return None
+
+    def _age_seconds(
+        self,
+        value: str | None
+    ):
+        parsed = self._parse_datetime(
+            value
+        )
+
+        if parsed is None:
+            return None
+
+        return max(
+            (
+                datetime.now(
+                    timezone.utc
+                )
+                - parsed
+            ).total_seconds(),
+            0
+        )
+
+    def _to_float(
+        self,
+        value
+    ):
+        if value is None:
+            return None
+
+        try:
+            return float(
+                value
+            )
+
+        except Exception:
+            return None
+
+    def _resolve_current_price(
+        self,
+        quote_data: dict
+    ):
+        last_price = self._to_float(
+            quote_data.get(
+                "lastPrice"
+            )
+        )
+
+        if last_price is not None:
+            return last_price, "LAST_PRICE"
+
+        best_bid = self._to_float(
+            quote_data.get(
+                "bestBid"
+            )
+        )
+
+        best_ask = self._to_float(
+            quote_data.get(
+                "bestAsk"
+            )
+        )
+
+        if (
+            best_bid is not None
+            and best_ask is not None
+        ):
+            return (
+                (best_bid + best_ask) / 2,
+                "BID_ASK_MID"
+            )
+
+        if best_bid is not None:
+            return best_bid, "BID_ONLY"
+
+        if best_ask is not None:
+            return best_ask, "ASK_ONLY"
+
+        return None, "UNAVAILABLE"
+
+    def _evaluate_market_gate(
+        self,
+        market: dict,
+        max_quote_age_seconds: int
+    ):
+        quote = market.get(
+            "quote"
+        )
+
+        quote_data = {}
+
+        if quote:
+            quote_data = quote.get(
+                "data",
+                quote
+            )
+
+        quote_timestamp = (
+            quote_data.get(
+                "lastUpdated"
+            )
+            or quote_data.get(
+                "timestamp"
+            )
+        )
+
+        quote_age_seconds = self._age_seconds(
+            quote_timestamp
+        )
+
+        current_price, current_price_source = (
+            self._resolve_current_price(
+                quote_data
+            )
+        )
+
+        blocks = []
+
+        if not quote:
+            blocks.append(
+                "Realtime quote is unavailable."
+            )
+
+        elif quote_age_seconds is None:
+            blocks.append(
+                "Realtime quote timestamp cannot be validated."
+            )
+
+        elif quote_age_seconds > max_quote_age_seconds:
+            blocks.append(
+                (
+                    f"Realtime quote is stale. "
+                    f"Age={quote_age_seconds:.2f}s, "
+                    f"maximum allowed={max_quote_age_seconds}s."
+                )
+            )
+
+        if quote and current_price is None:
+            blocks.append(
+                "Current market price is unavailable."
+            )
+
+        status = (
+            "BLOCK"
+            if blocks
+            else "PASS"
+        )
+
+        return {
+            "success": True,
+            "status": status,
+            "tradable": not blocks,
+            "blocks": blocks,
+            "quote": {
+                "available": quote is not None,
+                "lastUpdated": quote_timestamp,
+                "age_seconds": quote_age_seconds,
+                "max_age_seconds": max_quote_age_seconds,
+                "currentPrice": current_price,
+                "currentPriceSource": current_price_source,
+                "lastPrice": quote_data.get(
+                    "lastPrice"
+                ),
+                "bestBid": quote_data.get(
+                    "bestBid"
+                ),
+                "bestAsk": quote_data.get(
+                    "bestAsk"
+                )
+            },
+            "market_gate_version": "MARKET_GATE_V1"
+        }
+
     def _utc_lookback_iso(
         self,
         hours: int
@@ -486,6 +682,11 @@ class BotService:
             []
         )
 
+        market_gate = self._evaluate_market_gate(
+            market=market,
+            max_quote_age_seconds=max_quote_age_seconds
+        )
+
         if not account:
             raise ValueError(
                 "Account state is unavailable."
@@ -495,6 +696,90 @@ class BotService:
             raise ValueError(
                 "Contract state is unavailable."
             )
+
+        if not market_gate.get(
+            "tradable",
+            False
+        ):
+            gate_blocks = market_gate.get(
+                "blocks",
+                []
+            )
+
+            reason = (
+                "Market data is not fresh enough for "
+                "AI trade evaluation."
+            )
+
+            if gate_blocks:
+                reason = gate_blocks[0]
+
+            strategy_result = {
+                "success": True,
+                "status": "BLOCK",
+                "action": "WAIT",
+                "ai_used": False,
+                "reason": reason,
+                "market": {
+                    "current_price": market_gate.get(
+                        "quote",
+                        {}
+                    ).get(
+                        "currentPrice"
+                    ),
+                    "current_price_source": market_gate.get(
+                        "quote",
+                        {}
+                    ).get(
+                        "currentPriceSource"
+                    )
+                },
+                "ai_analysis": {
+                    "confidence": 0,
+                    "market_bias": "UNKNOWN",
+                    "setup_valid": False,
+                    "data_quality": "STALE",
+                    "validation_errors": gate_blocks,
+                    "reason": reason
+                },
+                "strategy_version": "MARKET_GATE_V1",
+                "model": None
+            }
+
+            final_decision = {
+                "success": True,
+                "final_status": "BLOCK",
+                "action": "WAIT",
+                "execution_allowed": False,
+                "reason": reason,
+                "market_gate": market_gate,
+                "decision_version": (
+                    "FINAL_DECISION_MARKET_GATE_V1"
+                )
+            }
+
+            safety_result = {
+                "success": True,
+                "safety_status": "BLOCK",
+                "safe_to_execute": False,
+                "action": "WAIT",
+                "blocks": gate_blocks,
+                "warnings": [],
+                "market_gate": market_gate,
+                "safety_version": "SAFETY_MARKET_GATE_V1"
+            }
+
+            return {
+                "success": True,
+                "state": state,
+                "strategy": strategy_result,
+                "rule": None,
+                "risk": None,
+                "final_decision": final_decision,
+                "safety": safety_result,
+                "ready_for_execution": False,
+                "market_gate": market_gate
+            }
 
         strategy_result = self.strategy_service.evaluate_strategy(
             symbol=symbol,
@@ -610,7 +895,8 @@ class BotService:
                     "safe_to_execute",
                     False
                 )
-            )
+            ),
+            "market_gate": market_gate
         }
 
     async def run_once(
@@ -923,6 +1209,10 @@ class BotService:
         safety = workflow.get(
             "safety",
             {}
+        )
+
+        market_gate = workflow.get(
+            "market_gate"
         )
 
         execution_guard = None
@@ -1246,6 +1536,7 @@ class BotService:
                     "execution_allowed"
                 )
             },
+            "market_gate": market_gate,
             "pre_trade_rules": pre_trade_rules,
             "daily_profit_lock": daily_profit_lock,
             "rule": rule,
