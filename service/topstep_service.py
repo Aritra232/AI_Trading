@@ -114,7 +114,6 @@ class TopstepService:
                 json=payload
             )
 
-        # token expired হলে once retry
         if response.status_code == 401:
             self._token = None
             token = await self.get_token()
