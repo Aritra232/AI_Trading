@@ -1113,7 +1113,7 @@ async def get_dashboard_summary(
 async def get_live_readiness(
     session_id: str,
     account_id: int,
-    symbol: str = "MES",
+    symbol: str = "AUTO",
     phase: str = "evaluation",
     account_size: int = 50000,
     planned_quantity: int = 1,
@@ -1155,11 +1155,31 @@ async def get_live_readiness(
                 f"Account {account_id} not found."
             )
 
+        requested_symbol = symbol
+        symbol_selection = None
+        resolved_symbol = symbol
+
+        if runtime["bot_service"]._is_auto_symbol(
+            symbol
+        ):
+            symbol_selection = (
+                await runtime["bot_service"]._resolve_auto_symbol(
+                    account_id=account_id,
+                    live=live,
+                    account_size=account_size,
+                    phase=phase
+                )
+            )
+
+            resolved_symbol = symbol_selection[
+                "selected_symbol"
+            ]
+
         market_task = runtime[
             "market_status_service"
         ].get_status(
             account_id=account_id,
-            symbol=symbol,
+            symbol=resolved_symbol,
             live=live,
             auto_start_realtime=auto_start_realtime,
             realtime_warmup_seconds=realtime_warmup_seconds,
@@ -1231,7 +1251,7 @@ async def get_live_readiness(
         rules = rule_service.evaluate_rules(
             account=selected_account,
             account_size=account_size,
-            symbol=symbol,
+            symbol=resolved_symbol,
             planned_quantity=planned_quantity,
             current_mll=rule_pack.get(
                 "maximum_loss_limit_floor"
@@ -1396,7 +1416,9 @@ async def get_live_readiness(
                     "simulated"
                 )
             },
-            "symbol": symbol,
+            "symbol": resolved_symbol,
+            "requested_symbol": requested_symbol,
+            "symbol_selection": symbol_selection,
             "phase": phase,
             "market": market_status,
             "rules": {
