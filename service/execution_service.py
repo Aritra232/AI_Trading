@@ -98,6 +98,65 @@ class ExecutionService:
 
         return bracketless
 
+    def _validate_bracket_tick_signs(
+        self,
+        action: str,
+        payload: dict
+    ) -> str | None:
+        stop_bracket = payload.get(
+            "stopLossBracket"
+        )
+        take_profit_bracket = payload.get(
+            "takeProfitBracket"
+        )
+
+        stop_ticks = (
+            stop_bracket or {}
+        ).get(
+            "ticks"
+        )
+        take_profit_ticks = (
+            take_profit_bracket or {}
+        ).get(
+            "ticks"
+        )
+
+        if action == "BUY":
+            if (
+                stop_ticks is not None
+                and stop_ticks >= 0
+            ):
+                return (
+                    "BUY stop-loss bracket ticks must be negative."
+                )
+
+            if (
+                take_profit_ticks is not None
+                and take_profit_ticks <= 0
+            ):
+                return (
+                    "BUY take-profit bracket ticks must be positive."
+                )
+
+        if action == "SELL":
+            if (
+                stop_ticks is not None
+                and stop_ticks <= 0
+            ):
+                return (
+                    "SELL stop-loss bracket ticks must be positive."
+                )
+
+            if (
+                take_profit_ticks is not None
+                and take_profit_ticks >= 0
+            ):
+                return (
+                    "SELL take-profit bracket ticks must be negative."
+                )
+
+        return None
+
     def live_gate_status(
         self,
         confirm_live_execution: bool = False
@@ -294,14 +353,14 @@ class ExecutionService:
             return None
 
         ticks = round(
-            abs(
-                float(price_a)
-                - float(price_b)
+            (
+                float(price_b)
+                - float(price_a)
             )
             / float(tick_size)
         )
 
-        if ticks <= 0:
+        if ticks == 0:
             return None
 
         return int(ticks)
@@ -478,30 +537,55 @@ class ExecutionService:
             {}
         )
 
-        payload = self.build_order_payload(
-            account_id=account_id,
-            contract_id=contract_id,
-            action=action,
-            quantity=int(
-                final_decision.get(
-                    "planned_quantity",
-                    1
+        try:
+            payload = self.build_order_payload(
+                account_id=account_id,
+                contract_id=contract_id,
+                action=action,
+                quantity=int(
+                    final_decision.get(
+                        "planned_quantity",
+                        1
+                    )
+                ),
+                order_type=order_type,
+                entry_price=trade_plan.get(
+                    "entry_price"
+                ),
+                stop_loss=trade_plan.get(
+                    "stop_loss"
+                ),
+                take_profit=trade_plan.get(
+                    "take_profit"
+                ),
+                tick_size=contract.get(
+                    "tickSize"
                 )
-            ),
-            order_type=order_type,
-            entry_price=trade_plan.get(
-                "entry_price"
-            ),
-            stop_loss=trade_plan.get(
-                "stop_loss"
-            ),
-            take_profit=trade_plan.get(
-                "take_profit"
-            ),
-            tick_size=contract.get(
-                "tickSize"
             )
+
+        except ValueError as exc:
+            return {
+                "success": True,
+                "execution_status": "BLOCKED",
+                "submitted": False,
+                "reason": str(
+                    exc
+                )
+            }
+
+        bracket_sign_error = self._validate_bracket_tick_signs(
+            action=action,
+            payload=payload
         )
+
+        if bracket_sign_error:
+            return {
+                "success": True,
+                "execution_status": "BLOCKED",
+                "submitted": False,
+                "reason": bracket_sign_error,
+                "order_payload": payload
+            }
 
         return {
             "success": True,
