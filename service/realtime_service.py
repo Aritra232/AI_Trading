@@ -1,6 +1,7 @@
 import asyncio
 import os
 import threading
+import time
 from typing import Any, Dict, Optional
 
 from signalrcore.hub_connection_builder import HubConnectionBuilder
@@ -17,6 +18,12 @@ class RealtimeService:
 
         self.user_account_id: Optional[int] = None
         self.market_contract_id: Optional[str] = None
+        self.user_connected = False
+        self.market_connected = False
+        self._last_user_start_attempt = 0.0
+        self._last_market_start_attempt = 0.0
+        self._user_start_lock = asyncio.Lock()
+        self._market_start_lock = asyncio.Lock()
 
         self.latest: Dict[str, Any] = {
             "account": None,
@@ -55,6 +62,27 @@ class RealtimeService:
 
         print(f"\n[REALTIME] {key}")
         print(value)
+
+    def _reconnect_cooldown_seconds(self) -> float:
+        try:
+            return float(
+                os.getenv(
+                    "REALTIME_RECONNECT_COOLDOWN_SECONDS",
+                    "15"
+                )
+            )
+
+        except Exception:
+            return 15.0
+
+    def _within_reconnect_cooldown(
+        self,
+        last_attempt: float
+    ) -> bool:
+        return (
+            time.monotonic() - last_attempt
+            < self._reconnect_cooldown_seconds()
+        )
 
     def _set_latest(self, key: str, value: Any):
         with self._lock:
@@ -192,16 +220,24 @@ class RealtimeService:
             )
         )
 
-        connection.on_open(
-            lambda: print(
+        def on_open():
+            self.user_connected = True
+            print(
                 "[REALTIME] User Hub connected"
             )
+
+        def on_close():
+            self.user_connected = False
+            print(
+                "[REALTIME] User Hub disconnected"
+            )
+
+        connection.on_open(
+            on_open
         )
 
         connection.on_close(
-            lambda: print(
-                "[REALTIME] User Hub disconnected"
-            )
+            on_close
         )
 
         connection.on_error(
@@ -216,59 +252,106 @@ class RealtimeService:
         self,
         account_id: int
     ):
-        token = await self.topstep_service.get_token()
+        async with self._user_start_lock:
+            if (
+                self.user_connection is not None
+                and self.user_account_id == account_id
+                and self.user_connected
+            ):
+                return {
+                    "success": True,
+                    "message": (
+                        "User realtime connection already active"
+                    ),
+                    "account_id": account_id,
+                    "reused": True
+                }
 
-        # Stop existing connection first
-        if self.user_connection is not None:
+            if (
+                self.user_connection is not None
+                and self.user_account_id == account_id
+                and self._within_reconnect_cooldown(
+                    self._last_user_start_attempt
+                )
+            ):
+                return {
+                    "success": True,
+                    "message": (
+                        "User realtime reconnect throttled"
+                    ),
+                    "account_id": account_id,
+                    "reused": True,
+                    "throttled": True
+                }
+
+            token = await self.topstep_service.get_token()
+
+            if self.user_connection is not None:
+                try:
+                    self.user_connection.stop()
+                except Exception:
+                    pass
+
+                self.user_connected = False
+
+            self.user_account_id = account_id
+            self._last_user_start_attempt = time.monotonic()
+
+            self.user_connection = (
+                self._build_user_connection(token)
+            )
+
             try:
-                self.user_connection.stop()
-            except Exception:
-                pass
+                self.user_connection.start()
 
-        self.user_account_id = account_id
+                await asyncio.sleep(2)
 
-        self.user_connection = (
-            self._build_user_connection(token)
-        )
+                self.user_connection.send(
+                    "SubscribeAccounts",
+                    []
+                )
 
-        self.user_connection.start()
+                self.user_connection.send(
+                    "SubscribeOrders",
+                    [account_id]
+                )
 
-        # Allow connection to establish
-        await asyncio.sleep(2)
+                self.user_connection.send(
+                    "SubscribePositions",
+                    [account_id]
+                )
 
-        # Official ProjectX subscriptions
+                self.user_connection.send(
+                    "SubscribeTrades",
+                    [account_id]
+                )
 
-        self.user_connection.send(
-            "SubscribeAccounts",
-            []
-        )
+            except Exception as exc:
+                self.user_connected = False
 
-        self.user_connection.send(
-            "SubscribeOrders",
-            [account_id]
-        )
+                return {
+                    "success": False,
+                    "message": (
+                        "User realtime connection failed"
+                    ),
+                    "account_id": account_id,
+                    "error": str(
+                        exc
+                    )
+                }
 
-        self.user_connection.send(
-            "SubscribePositions",
-            [account_id]
-        )
-
-        self.user_connection.send(
-            "SubscribeTrades",
-            [account_id]
-        )
-
-        return {
-            "success": True,
-            "message": "User realtime connection started",
-            "account_id": account_id,
-            "subscriptions": [
-                "accounts",
-                "orders",
-                "positions",
-                "trades"
-            ]
-        }
+            return {
+                "success": True,
+                "message": "User realtime connection started",
+                "account_id": account_id,
+                "subscriptions": [
+                    "accounts",
+                    "orders",
+                    "positions",
+                    "trades"
+                ],
+                "reused": False
+            }
 
     # =========================
     # Market Hub
@@ -329,16 +412,24 @@ class RealtimeService:
             )
         )
 
-        connection.on_open(
-            lambda: print(
+        def on_open():
+            self.market_connected = True
+            print(
                 "[REALTIME] Market Hub connected"
             )
+
+        def on_close():
+            self.market_connected = False
+            print(
+                "[REALTIME] Market Hub disconnected"
+            )
+
+        connection.on_open(
+            on_open
         )
 
         connection.on_close(
-            lambda: print(
-                "[REALTIME] Market Hub disconnected"
-            )
+            on_close
         )
 
         connection.on_error(
@@ -353,53 +444,100 @@ class RealtimeService:
         self,
         contract_id: str
     ):
-        token = await self.topstep_service.get_token()
+        async with self._market_start_lock:
+            if (
+                self.market_connection is not None
+                and self.market_contract_id == contract_id
+                and self.market_connected
+            ):
+                return {
+                    "success": True,
+                    "message": (
+                        "Market realtime connection already active"
+                    ),
+                    "contract_id": contract_id,
+                    "reused": True
+                }
 
-        # Stop existing connection first
-        if self.market_connection is not None:
+            if (
+                self.market_connection is not None
+                and self.market_contract_id == contract_id
+                and self._within_reconnect_cooldown(
+                    self._last_market_start_attempt
+                )
+            ):
+                return {
+                    "success": True,
+                    "message": (
+                        "Market realtime reconnect throttled"
+                    ),
+                    "contract_id": contract_id,
+                    "reused": True,
+                    "throttled": True
+                }
+
+            token = await self.topstep_service.get_token()
+
+            if self.market_connection is not None:
+                try:
+                    self.market_connection.stop()
+                except Exception:
+                    pass
+
+                self.market_connected = False
+
+            self.market_contract_id = contract_id
+            self._last_market_start_attempt = time.monotonic()
+
+            self.market_connection = (
+                self._build_market_connection(token)
+            )
+
             try:
-                self.market_connection.stop()
-            except Exception:
-                pass
+                self.market_connection.start()
 
-        self.market_contract_id = contract_id
+                await asyncio.sleep(2)
 
-        self.market_connection = (
-            self._build_market_connection(token)
-        )
+                self.market_connection.send(
+                    "SubscribeContractQuotes",
+                    [contract_id]
+                )
 
-        self.market_connection.start()
+                self.market_connection.send(
+                    "SubscribeContractTrades",
+                    [contract_id]
+                )
 
-        # Allow connection to establish
-        await asyncio.sleep(2)
+                self.market_connection.send(
+                    "SubscribeContractMarketDepth",
+                    [contract_id]
+                )
 
-        # Official ProjectX subscriptions
+            except Exception as exc:
+                self.market_connected = False
 
-        self.market_connection.send(
-            "SubscribeContractQuotes",
-            [contract_id]
-        )
+                return {
+                    "success": False,
+                    "message": (
+                        "Market realtime connection failed"
+                    ),
+                    "contract_id": contract_id,
+                    "error": str(
+                        exc
+                    )
+                }
 
-        self.market_connection.send(
-            "SubscribeContractTrades",
-            [contract_id]
-        )
-
-        self.market_connection.send(
-            "SubscribeContractMarketDepth",
-            [contract_id]
-        )
-
-        return {
-            "success": True,
-            "message": "Market realtime connection started",
-            "contract_id": contract_id,
-            "subscriptions": [
-                "quotes",
-                "market_trades",
-                "market_depth"
-            ]
-        }
+            return {
+                "success": True,
+                "message": "Market realtime connection started",
+                "contract_id": contract_id,
+                "subscriptions": [
+                    "quotes",
+                    "market_trades",
+                    "market_depth"
+                ],
+                "reused": False
+            }
 
     # =========================
     # Latest Data
@@ -426,6 +564,8 @@ class RealtimeService:
                 pass
 
             self.user_connection = None
+            self.user_connected = False
+            self.user_account_id = None
 
         if self.market_connection is not None:
             try:
@@ -434,6 +574,8 @@ class RealtimeService:
                 pass
 
             self.market_connection = None
+            self.market_connected = False
+            self.market_contract_id = None
 
         return {
             "success": True,

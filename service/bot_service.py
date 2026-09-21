@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -255,6 +256,808 @@ class BotService:
             "+00:00",
             "Z"
         )
+
+    def _auto_symbol_candidates(
+        self
+    ):
+        raw = (
+            os.getenv(
+                "AUTO_TRADE_CONTRACT_SEARCH_TEXTS",
+                ""
+            )
+            or os.getenv(
+                "AUTO_TRADE_SYMBOLS",
+                ""
+            )
+        )
+
+        candidates = []
+        seen = set()
+
+        for item in raw.split(","):
+            symbol = item.strip()
+
+            if (
+                not symbol
+                or symbol in seen
+            ):
+                continue
+
+            seen.add(
+                symbol
+            )
+            candidates.append(
+                symbol
+            )
+
+        return candidates or [""]
+
+    def _auto_contract_limit(
+        self
+    ) -> int:
+        try:
+            return max(
+                int(
+                    os.getenv(
+                        "AUTO_TRADE_CONTRACT_LIMIT",
+                        "80"
+                    )
+                ),
+                1
+            )
+
+        except Exception:
+            return 80
+
+    def _contract_root_symbol(
+        self,
+        contract: dict
+    ) -> str:
+        symbol_id = str(
+            contract.get(
+                "symbolId",
+                ""
+            )
+        ).strip()
+
+        if symbol_id:
+            return symbol_id.split(".")[-1].upper()
+
+        name = str(
+            contract.get(
+                "name",
+                ""
+            )
+        ).strip().upper()
+
+        match = re.match(
+            r"^(.+?)[FGHJKMNQUVXZ]\d{1,2}$",
+            name
+        )
+
+        if match:
+            return match.group(1)
+
+        return name
+
+    def _summarize_contract(
+        self,
+        contract: dict
+    ) -> dict:
+        return {
+            "id": contract.get(
+                "id"
+            ),
+            "name": contract.get(
+                "name"
+            ),
+            "description": contract.get(
+                "description"
+            ),
+            "tickSize": contract.get(
+                "tickSize"
+            ),
+            "tickValue": contract.get(
+                "tickValue"
+            ),
+            "activeContract": contract.get(
+                "activeContract"
+            ),
+            "symbolId": contract.get(
+                "symbolId"
+            )
+        }
+
+    def _rotation_enabled(
+        self
+    ) -> bool:
+        return (
+            os.getenv(
+                "INSTRUMENT_ROTATION_ENABLED",
+                "true"
+            ).strip().lower()
+            == "true"
+        )
+
+    def _rotation_loss_threshold(
+        self
+    ) -> int:
+        try:
+            return max(
+                int(
+                    os.getenv(
+                        "INSTRUMENT_ROTATION_LOSS_THRESHOLD",
+                        "3"
+                    )
+                ),
+                1
+            )
+
+        except Exception:
+            return 3
+
+    def _rotation_cooldown_minutes(
+        self
+    ) -> int:
+        try:
+            return max(
+                int(
+                    os.getenv(
+                        "INSTRUMENT_ROTATION_COOLDOWN_MINUTES",
+                        "1440"
+                    )
+                ),
+                1
+            )
+
+        except Exception:
+            return 1440
+
+    def _rotation_lookback_days(
+        self
+    ) -> int:
+        try:
+            return max(
+                int(
+                    os.getenv(
+                        "INSTRUMENT_ROTATION_LOOKBACK_DAYS",
+                        "14"
+                    )
+                ),
+                1
+            )
+
+        except Exception:
+            return 14
+
+    def _rotation_refresh_interval_seconds(
+        self
+    ) -> int:
+        try:
+            return max(
+                int(
+                    os.getenv(
+                        "INSTRUMENT_ROTATION_REFRESH_SECONDS",
+                        "300"
+                    )
+                ),
+                0
+            )
+
+        except Exception:
+            return 300
+
+    def _extract_trade_contract_id(
+        self,
+        trade: dict
+    ) -> str | None:
+        for key in (
+            "contractId",
+            "contract_id",
+            "contractID",
+            "symbolId",
+            "symbol"
+        ):
+            value = trade.get(
+                key
+            )
+
+            if value:
+                return str(
+                    value
+                )
+
+        contract = trade.get(
+            "contract"
+        )
+
+        if isinstance(
+            contract,
+            dict
+        ):
+            value = (
+                contract.get(
+                    "id"
+                )
+                or contract.get(
+                    "contractId"
+                )
+                or contract.get(
+                    "symbolId"
+                )
+                or contract.get(
+                    "name"
+                )
+            )
+
+            if value:
+                return str(
+                    value
+                )
+
+        return None
+
+    def _extract_trade_symbol(
+        self,
+        trade: dict,
+        contract_id: str | None = None
+    ) -> str | None:
+        for key in (
+            "symbol",
+            "symbolId",
+            "contractName",
+            "contract_name",
+            "name"
+        ):
+            value = trade.get(
+                key
+            )
+
+            if value:
+                return str(
+                    value
+                ).upper()
+
+        if contract_id:
+            return str(
+                contract_id
+            ).split(".")[-1].upper()
+
+        return None
+
+    def _prune_rotation_blocks(
+        self,
+        blocked_contracts: dict
+    ) -> dict:
+        now = datetime.now(
+            timezone.utc
+        )
+
+        active = {}
+
+        for contract_id, data in (
+            blocked_contracts or {}
+        ).items():
+            blocked_until = self._parse_datetime(
+                data.get(
+                    "blocked_until"
+                )
+            )
+
+            if (
+                blocked_until is not None
+                and blocked_until > now
+            ):
+                active[contract_id] = data
+
+        return active
+
+    async def _refresh_instrument_rotation(
+        self,
+        account_id: int
+    ) -> dict:
+        if (
+            not self._rotation_enabled()
+            or self.bot_state_service is None
+            or self.trading_day_service is None
+            or getattr(
+                self.trading_day_service,
+                "trade_service",
+                None
+            ) is None
+        ):
+            return {
+                "enabled": self._rotation_enabled(),
+                "updated": False,
+                "reason": (
+                    "Instrument rotation prerequisites "
+                    "are not configured."
+                ),
+                "blocked_contracts": {}
+            }
+
+        loss_threshold = self._rotation_loss_threshold()
+        cooldown_minutes = self._rotation_cooldown_minutes()
+        lookback_days = self._rotation_lookback_days()
+        refresh_interval_seconds = (
+            self._rotation_refresh_interval_seconds()
+        )
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        existing = (
+            self.bot_state_service
+            .get_instrument_rotation()
+        )
+
+        last_checked_at = self._parse_datetime(
+            existing.get(
+                "last_checked_at"
+            )
+        )
+
+        if (
+            last_checked_at is not None
+            and refresh_interval_seconds > 0
+            and (
+                now - last_checked_at
+            ).total_seconds() < refresh_interval_seconds
+        ):
+            pruned_blocks = self._prune_rotation_blocks(
+                existing.get(
+                    "blocked_contracts",
+                    {}
+                )
+            )
+
+            if pruned_blocks != existing.get(
+                "blocked_contracts",
+                {}
+            ):
+                existing = (
+                    self.bot_state_service
+                    .update_instrument_rotation(
+                        {
+                            **existing,
+                            "blocked_contracts": pruned_blocks
+                        }
+                    )
+                    .get(
+                        "instrument_rotation",
+                        existing
+                    )
+                )
+
+            return {
+                **existing,
+                "enabled": True,
+                "refreshed": False,
+                "refresh_interval_seconds": (
+                    refresh_interval_seconds
+                )
+            }
+
+        start_time = (
+            now
+            - timedelta(
+                days=lookback_days
+            )
+        ).isoformat().replace(
+            "+00:00",
+            "Z"
+        )
+
+        end_time = now.isoformat().replace(
+            "+00:00",
+            "Z"
+        )
+
+        trades_result = (
+            await self.trading_day_service.trade_service.get_trades(
+                account_id=account_id,
+                start_timestamp=start_time,
+                end_timestamp=end_time
+            )
+        )
+
+        trades = self.trading_day_service._extract_trades(
+            trades_result
+        )
+
+        grouped = {}
+
+        for trade in trades:
+            contract_id = self._extract_trade_contract_id(
+                trade
+            )
+
+            if not contract_id:
+                continue
+
+            timestamp = self.trading_day_service._extract_timestamp(
+                trade
+            )
+
+            pnl = self.trading_day_service._extract_pnl(
+                trade
+            )
+
+            if pnl is None:
+                continue
+
+            grouped.setdefault(
+                contract_id,
+                []
+            ).append(
+                {
+                    "timestamp": timestamp,
+                    "pnl": float(
+                        pnl
+                    ),
+                    "symbol": self._extract_trade_symbol(
+                        trade,
+                        contract_id=contract_id
+                    )
+                }
+            )
+
+        blocked_contracts = self._prune_rotation_blocks(
+            existing.get(
+                "blocked_contracts",
+                {}
+            )
+        )
+
+        rotation_events = []
+
+        for contract_id, items in grouped.items():
+            sorted_items = sorted(
+                items,
+                key=lambda item: (
+                    item.get(
+                        "timestamp"
+                    )
+                    or datetime.min.replace(
+                        tzinfo=timezone.utc
+                    )
+                ),
+                reverse=True
+            )
+
+            consecutive_losses = 0
+            latest_loss_at = None
+            symbol = None
+
+            for item in sorted_items:
+                pnl = item.get(
+                    "pnl"
+                )
+
+                if pnl < 0:
+                    consecutive_losses += 1
+                    latest_loss_at = (
+                        latest_loss_at
+                        or item.get(
+                            "timestamp"
+                        )
+                    )
+                    symbol = (
+                        symbol
+                        or item.get(
+                            "symbol"
+                        )
+                    )
+                    continue
+
+                break
+
+            if consecutive_losses >= loss_threshold:
+                blocked_until_dt = (
+                    now
+                    + timedelta(
+                        minutes=cooldown_minutes
+                    )
+                )
+
+                blocked_until = blocked_until_dt.isoformat().replace(
+                    "+00:00",
+                    "Z"
+                )
+
+                blocked_contracts[contract_id] = {
+                    "contract_id": contract_id,
+                    "symbol": symbol,
+                    "loss_count": consecutive_losses,
+                    "loss_threshold": loss_threshold,
+                    "blocked_at": end_time,
+                    "blocked_until": blocked_until,
+                    "latest_loss_at": (
+                        latest_loss_at.isoformat().replace(
+                            "+00:00",
+                            "Z"
+                        )
+                        if latest_loss_at
+                        else None
+                    ),
+                    "reason": (
+                        f"{consecutive_losses} consecutive "
+                        "realized losing trades detected."
+                    )
+                }
+
+                rotation_events.append(
+                    blocked_contracts[contract_id]
+                )
+
+        rotation = {
+            "enabled": True,
+            "loss_threshold": loss_threshold,
+            "cooldown_minutes": cooldown_minutes,
+            "lookback_days": lookback_days,
+            "refresh_interval_seconds": (
+                refresh_interval_seconds
+            ),
+            "blocked_contracts": blocked_contracts,
+            "last_checked_at": end_time,
+            "refreshed": True,
+            "trade_count": len(
+                trades
+            ),
+            "source": "TOPSTEP_TRADE_SEARCH",
+            "raw_success": trades_result.get(
+                "success"
+            ),
+            "events": rotation_events
+        }
+
+        saved = self.bot_state_service.update_instrument_rotation(
+            rotation
+        )
+
+        return saved.get(
+            "instrument_rotation",
+            rotation
+        )
+
+    def _is_contract_rotation_blocked(
+        self,
+        contract: dict,
+        rotation: dict | None
+    ) -> dict | None:
+        if not rotation:
+            return None
+
+        blocked_contracts = rotation.get(
+            "blocked_contracts",
+            {}
+        )
+
+        contract_id = str(
+            contract.get(
+                "id",
+                ""
+            )
+        )
+
+        if contract_id in blocked_contracts:
+            return blocked_contracts[
+                contract_id
+            ]
+
+        symbol = self._contract_root_symbol(
+            contract
+        )
+
+        for data in blocked_contracts.values():
+            if str(
+                data.get(
+                    "symbol",
+                    ""
+                )
+            ).upper() == symbol:
+                return data
+
+        return None
+
+    async def _discover_auto_contracts(
+        self,
+        live: bool,
+        rotation: dict | None = None
+    ):
+        search_terms = self._auto_symbol_candidates()
+        discovered = []
+        checked = []
+        seen_ids = set()
+
+        for search_term in search_terms:
+            try:
+                contracts_result = (
+                    await self.contract_service.search_contracts(
+                        search_text=search_term,
+                        live=live
+                    )
+                )
+
+                contracts = contracts_result.get(
+                    "contracts",
+                    []
+                )
+
+                checked.append(
+                    {
+                        "search_text": search_term,
+                        "count": len(
+                            contracts
+                        ),
+                        "success": contracts_result.get(
+                            "success"
+                        )
+                    }
+                )
+
+                for contract in contracts:
+                    contract_id = contract.get(
+                        "id"
+                    )
+
+                    if (
+                        not contract_id
+                        or contract_id in seen_ids
+                    ):
+                        continue
+
+                    if not contract.get(
+                        "activeContract",
+                        False
+                    ):
+                        continue
+
+                    if self._is_contract_rotation_blocked(
+                        contract=contract,
+                        rotation=rotation
+                    ):
+                        continue
+
+                    seen_ids.add(
+                        contract_id
+                    )
+                    discovered.append(
+                        contract
+                    )
+
+            except Exception as exc:
+                checked.append(
+                    {
+                        "search_text": search_term,
+                        "count": 0,
+                        "success": False,
+                        "error": str(
+                            exc
+                        )
+                    }
+                )
+
+        limit = self._auto_contract_limit()
+
+        return {
+            "contracts": discovered[:limit],
+            "checked": checked,
+            "search_terms": search_terms,
+            "limit": limit,
+            "total_active_found": len(
+                discovered
+            )
+        }
+
+    def _is_auto_symbol(
+        self,
+        symbol: str
+    ) -> bool:
+        return str(
+            symbol or ""
+        ).strip().upper() in {
+            "AUTO",
+            "AI",
+            "BEST"
+        }
+
+    async def _resolve_auto_symbol(
+        self,
+        account_id: int,
+        live: bool,
+        account_size: int = 50000,
+        phase: str = "evaluation"
+    ):
+        rotation = await self._refresh_instrument_rotation(
+            account_id=account_id
+        )
+
+        discovery = await self._discover_auto_contracts(
+            live=live,
+            rotation=rotation
+        )
+
+        contracts = discovery.get(
+            "contracts",
+            []
+        )
+
+        if not contracts:
+            raise ValueError(
+                (
+                    "No active contracts found from Topstep "
+                    "contract search after applying "
+                    "instrument-rotation blocks."
+                )
+            )
+
+        ai_selection = (
+            self.strategy_service
+            .select_contract_for_auto_trading(
+                contracts=contracts,
+                account_size=account_size,
+                phase=phase
+            )
+        )
+
+        selected_contract_id = ai_selection[
+            "selected_contract_id"
+        ]
+
+        selected_contract = None
+
+        for contract in contracts:
+            if str(
+                contract.get(
+                    "id"
+                )
+            ) == selected_contract_id:
+                selected_contract = contract
+                break
+
+        if selected_contract is None:
+            selected_contract = contracts[0]
+
+        selected_symbol = (
+            ai_selection.get(
+                "selected_symbol"
+            )
+            or self._contract_root_symbol(
+                selected_contract
+            )
+        ).upper()
+
+        return {
+            "requested_symbol": "AUTO",
+            "selected_symbol": selected_symbol,
+            "contract": selected_contract,
+            "contract_universe_count": len(
+                contracts
+            ),
+            "topstep_active_contract_count": discovery.get(
+                "total_active_found"
+            ),
+            "checked": discovery.get(
+                "checked",
+                []
+            ),
+            "instrument_rotation": rotation,
+            "candidate_contracts": [
+                self._summarize_contract(
+                    contract
+                )
+                for contract in contracts
+            ],
+            "ai_selection": ai_selection,
+            "selection_version": (
+                "DYNAMIC_AI_CONTRACT_SELECTOR_V1"
+            ),
+            "reason": ai_selection.get(
+                "reason"
+            )
+        }
 
     async def _resolve_active_contract(
         self,
@@ -902,7 +1705,7 @@ class BotService:
     async def run_once(
         self,
         account_id: int,
-        symbol: str = "MES",
+        symbol: str = "AUTO",
         dry_run: bool = True,
         account_size: int = 50000,
         planned_quantity: int = 1,
@@ -929,6 +1732,27 @@ class BotService:
         confirm_live_execution: bool = False
     ):
         evaluation_metrics = None
+        requested_symbol = symbol
+        symbol_selection = None
+        resolved_contract = None
+
+        if self._is_auto_symbol(
+            symbol
+        ):
+            symbol_selection = await self._resolve_auto_symbol(
+                account_id=account_id,
+                live=live,
+                account_size=account_size,
+                phase=phase
+            )
+
+            symbol = symbol_selection[
+                "selected_symbol"
+            ]
+            resolved_contract = symbol_selection[
+                "contract"
+            ]
+
         normalized_phase = str(
             phase
         ).lower().strip()
@@ -1009,8 +1833,10 @@ class BotService:
         request_context = {
             "user_id": self.user_id,
             "session_id": self.session_id,
+            "requested_symbol": requested_symbol,
             "account_id": account_id,
             "symbol": symbol,
+            "symbol_selection": symbol_selection,
             "dry_run": dry_run,
             "account_size": account_size,
             "planned_quantity": planned_quantity,
@@ -1077,9 +1903,12 @@ class BotService:
         )
         request_context["kill_switch"] = effective_kill_switch
 
-        contract = await self._resolve_active_contract(
-            symbol=symbol,
-            live=live
+        contract = (
+            resolved_contract
+            or await self._resolve_active_contract(
+                symbol=symbol,
+                live=live
+            )
         )
 
         contract_id = contract.get(
@@ -1442,6 +2271,8 @@ class BotService:
                 else "live_blocked"
             ),
             "symbol": symbol,
+            "requested_symbol": requested_symbol,
+            "symbol_selection": symbol_selection,
             "phase": phase,
             "contract": {
                 "id": contract_id,
@@ -1641,7 +2472,7 @@ class BotService:
     async def run_auto(
         self,
         account_id: int,
-        symbol: str = "MES",
+        symbol: str = "AUTO",
         dry_run: bool = True,
         live: bool = False,
         phase: str = "evaluation",

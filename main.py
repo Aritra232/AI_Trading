@@ -2185,7 +2185,7 @@ async def evaluate_final_decision(
 )
 async def run_bot_auto(
     account_id: int,
-    symbol: str = "MES",
+    symbol: str = "AUTO",
     dry_run: bool = True,
     live: bool = False,
     phase: str = "evaluation",
@@ -2257,7 +2257,7 @@ async def run_bot_auto(
 async def run_bot_once(
     account_id: int,
 
-    symbol: str = "MES",
+    symbol: str = "AUTO",
 
     dry_run: bool = True,
 
@@ -2431,7 +2431,7 @@ async def get_bot_status(
 )
 async def start_bot_auto(
     account_id: int,
-    symbol: str = "MES",
+    symbol: str = "AUTO",
     dry_run: bool = True,
     live: bool = False,
     phase: str = "evaluation",
@@ -2493,7 +2493,7 @@ async def start_bot_auto(
 async def start_bot(
     account_id: int,
 
-    symbol: str = "MES",
+    symbol: str = "AUTO",
 
     dry_run: bool = True,
 

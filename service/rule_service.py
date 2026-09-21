@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 
@@ -48,12 +49,33 @@ class RuleService:
             }
         }
 
+        raw_micro_symbols = os.getenv(
+            "TOPSTEP_MICRO_SYMBOLS",
+            (
+                "MES,MNQ,MYM,M2K,MGC,MCL,MBT,MET,"
+                "M6A,M6B,M6C,M6E,M6J,M6S"
+            )
+        )
+
         self.micro_symbols = {
-            "MES",
-            "MNQ",
-            "MYM",
-            "M2K"
+            symbol.strip().upper()
+            for symbol in raw_micro_symbols.split(",")
+            if symbol.strip()
         }
+
+    def _is_micro_symbol(
+        self,
+        symbol: str
+    ) -> bool:
+        normalized = symbol.upper().strip()
+
+        if normalized in self.micro_symbols:
+            return True
+
+        return (
+            normalized.startswith("M")
+            and len(normalized) >= 3
+        )
 
     def get_rule_pack(
         self,
@@ -143,7 +165,9 @@ class RuleService:
 
         symbol = symbol.upper().strip()
 
-        is_micro = symbol in self.micro_symbols
+        is_micro = self._is_micro_symbol(
+            symbol
+        )
 
         if is_micro:
             max_contracts = rules[

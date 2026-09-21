@@ -106,6 +106,138 @@ class StrategyService:
 
         return normalized
 
+    def select_contract_for_auto_trading(
+        self,
+        contracts: List[dict],
+        account_size: int = 50000,
+        phase: str = "evaluation"
+    ) -> Dict[str, Any]:
+        if not contracts:
+            raise ValueError(
+                "No contracts were provided for AI selection."
+            )
+
+        summarized_contracts = []
+
+        for contract in contracts:
+            summarized_contracts.append(
+                {
+                    "id": contract.get("id"),
+                    "name": contract.get("name"),
+                    "description": contract.get("description"),
+                    "tickSize": contract.get("tickSize"),
+                    "tickValue": contract.get("tickValue"),
+                    "activeContract": contract.get("activeContract"),
+                    "symbolId": contract.get("symbolId")
+                }
+            )
+
+        instructions = """
+You are the instrument-selection component of an autonomous
+Topstep evaluation trading system.
+
+Choose exactly one contract from the supplied available contracts.
+
+Selection priorities:
+
+1. Only choose a contract from the provided list.
+2. Prefer active contracts.
+3. Prefer liquid, common futures instruments suitable for evaluation.
+4. Prefer smaller risk instruments when two choices are similar.
+5. Do not invent symbols or contract IDs.
+6. If the metadata is not enough to identify an advantage, choose the
+   safest commonly traded contract from the available list.
+
+Return JSON only with this exact shape:
+
+{
+  "selected_contract_id": "",
+  "selected_symbol": "",
+  "confidence": 0.0,
+  "reason": ""
+}
+"""
+
+        context = {
+            "account_size": account_size,
+            "phase": phase,
+            "contracts": summarized_contracts
+        }
+
+        response = self.client.responses.create(
+            model=self.model,
+            instructions=instructions,
+            input=json.dumps(
+                context,
+                default=str
+            )
+        )
+
+        raw_output = response.output_text
+
+        try:
+            result = json.loads(
+                raw_output
+            )
+
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "AI returned invalid contract-selection JSON."
+            ) from exc
+
+        selected_contract_id = str(
+            result.get(
+                "selected_contract_id",
+                ""
+            )
+        ).strip()
+
+        if not selected_contract_id:
+            raise ValueError(
+                "AI did not select a contract ID."
+            )
+
+        contract_ids = {
+            str(
+                contract.get(
+                    "id",
+                    ""
+                )
+            )
+            for contract in contracts
+        }
+
+        if selected_contract_id not in contract_ids:
+            raise ValueError(
+                "AI selected a contract outside the available list."
+            )
+
+        return {
+            "success": True,
+            "selected_contract_id": selected_contract_id,
+            "selected_symbol": str(
+                result.get(
+                    "selected_symbol",
+                    ""
+                )
+            ).strip().upper(),
+            "confidence": self._clamp_confidence(
+                result.get(
+                    "confidence"
+                )
+            ),
+            "reason": str(
+                result.get(
+                    "reason",
+                    ""
+                )
+            ).strip(),
+            "model": self.model,
+            "selection_version": (
+                "AI_CONTRACT_SELECTOR_V1"
+            )
+        }
+
     def _round_to_tick(
         self,
         value,

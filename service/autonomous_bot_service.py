@@ -310,7 +310,7 @@ class AutonomousBotService:
     async def start(
         self,
         account_id: int,
-        symbol: str = "MES",
+        symbol: str = "AUTO",
         dry_run: bool = True,
         account_size: int = 50000,
         planned_quantity: int = 1,
@@ -407,7 +407,7 @@ class AutonomousBotService:
     async def start_auto(
         self,
         account_id: int,
-        symbol: str = "MES",
+        symbol: str = "AUTO",
         dry_run: bool = True,
         live: bool = False,
         phase: str = "evaluation",

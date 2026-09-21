@@ -63,6 +63,13 @@ class BotStateService:
             "execution_guard": {
                 "recent_intents": []
             },
+            "instrument_rotation": {
+                "enabled": True,
+                "loss_threshold": 3,
+                "cooldown_minutes": 1440,
+                "updated_at": None,
+                "blocked_contracts": {}
+            },
             "created_at": now,
             "updated_at": now,
             "state_version": "BOT_STATE_V1"
@@ -120,6 +127,14 @@ class BotStateService:
             **default["execution_guard"],
             **state.get(
                 "execution_guard",
+                {}
+            )
+        }
+
+        merged["instrument_rotation"] = {
+            **default["instrument_rotation"],
+            **state.get(
+                "instrument_rotation",
                 {}
             )
         }
@@ -524,6 +539,37 @@ class BotStateService:
                 {}
             ),
             "recent_intents": recent_intents[-100:]
+        }
+
+        return self._save(
+            state
+        )
+
+    def get_instrument_rotation(
+        self
+    ) -> dict[str, Any]:
+        state = self._load()
+
+        return state.get(
+            "instrument_rotation",
+            self._default_state()[
+                "instrument_rotation"
+            ]
+        )
+
+    def update_instrument_rotation(
+        self,
+        rotation: dict[str, Any]
+    ) -> dict[str, Any]:
+        state = self._load()
+
+        state["instrument_rotation"] = {
+            **state.get(
+                "instrument_rotation",
+                {}
+            ),
+            **rotation,
+            "updated_at": self._utc_now_iso()
         }
 
         return self._save(

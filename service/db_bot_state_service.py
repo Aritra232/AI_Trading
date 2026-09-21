@@ -64,6 +64,14 @@ class DbBotStateService(BotStateService):
             )
         }
 
+        merged["instrument_rotation"] = {
+            **default["instrument_rotation"],
+            **state.get(
+                "instrument_rotation",
+                {}
+            )
+        }
+
         return merged
 
     def _save(
