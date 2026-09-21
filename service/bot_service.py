@@ -2268,7 +2268,11 @@ class BotService:
             "mode": (
                 "dry_run"
                 if dry_run
-                else "live_blocked"
+                else (
+                    "live"
+                    if live
+                    else "evaluation_live"
+                )
             ),
             "symbol": symbol,
             "requested_symbol": requested_symbol,

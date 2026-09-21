@@ -37,6 +37,67 @@ class ExecutionService:
             == "true"
         )
 
+    def _order_bracket_mode(
+        self
+    ) -> str:
+        mode = os.getenv(
+            "TOPSTEP_ORDER_BRACKET_MODE",
+            "AUTO"
+        ).strip().upper()
+
+        if mode not in {
+            "AUTO",
+            "ORDER",
+            "POSITION",
+            "NONE"
+        }:
+            return "AUTO"
+
+        return mode
+
+    def _uses_order_brackets(
+        self
+    ) -> bool:
+        return self._order_bracket_mode() in {
+            "AUTO",
+            "ORDER"
+        }
+
+    def _position_bracket_conflict(
+        self,
+        response: dict
+    ) -> bool:
+        message = str(
+            response.get(
+                "errorMessage",
+                ""
+            )
+        ).lower()
+
+        return (
+            "brackets cannot be used with position brackets"
+            in message
+        )
+
+    def _remove_order_brackets(
+        self,
+        payload: dict
+    ) -> dict:
+        bracketless = dict(
+            payload
+        )
+
+        bracketless.pop(
+            "stopLossBracket",
+            None
+        )
+        bracketless.pop(
+            "takeProfitBracket",
+            None
+        )
+
+        return bracketless
+
     def live_gate_status(
         self,
         confirm_live_execution: bool = False
@@ -303,6 +364,11 @@ class ExecutionService:
         if order_type == "STOP":
             payload["stopPrice"] = entry_price
 
+        if not self._uses_order_brackets():
+            return self._remove_order_brackets(
+                payload
+            )
+
         stop_ticks = self._ticks_between(
             entry_price,
             stop_loss,
@@ -442,6 +508,7 @@ class ExecutionService:
             "submitted": False,
             "action": action,
             "order_payload": payload,
+            "order_bracket_mode": self._order_bracket_mode(),
             "final_decision_summary": {
                 "final_status": final_decision.get(
                     "final_status"
@@ -713,9 +780,38 @@ class ExecutionService:
                 )
             }
 
+        order_payload = prepared[
+            "order_payload"
+        ]
+
         order_response = await self.order_service.place_order(
-            prepared["order_payload"]
+            order_payload
         )
+
+        bracket_retry_used = False
+        original_order_response = None
+
+        if (
+            not order_response.get(
+                "success",
+                False
+            )
+            and self._order_bracket_mode() == "AUTO"
+            and self._position_bracket_conflict(
+                order_response
+            )
+        ):
+            original_order_response = order_response
+            bracket_retry_used = True
+            order_payload = self._remove_order_brackets(
+                order_payload
+            )
+            prepared[
+                "order_payload"
+            ] = order_payload
+            order_response = await self.order_service.place_order(
+                order_payload
+            )
 
         submitted = bool(
             order_response.get(
@@ -736,9 +832,16 @@ class ExecutionService:
             "message": (
                 "Order submitted to ProjectX."
                 if submitted
-                else "ProjectX rejected the order."
+                else (
+                    "ProjectX rejected the order after retrying "
+                    "without order-level brackets."
+                    if bracket_retry_used
+                    else "ProjectX rejected the order."
+                )
             ),
             "order_response": order_response,
+            "original_order_response": original_order_response,
+            "bracket_retry_used": bracket_retry_used,
             "execution_version": (
                 "EXECUTION_LIVE_V1"
             )
