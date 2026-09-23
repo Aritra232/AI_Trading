@@ -106,6 +106,241 @@ class BotService:
         except Exception:
             return None
 
+    def _env_int(
+        self,
+        name: str,
+        default: int,
+        minimum: int | None = None
+    ) -> int:
+        try:
+            value = int(
+                os.getenv(
+                    name,
+                    str(default)
+                )
+            )
+
+            if minimum is not None:
+                value = max(
+                    value,
+                    minimum
+                )
+
+            return value
+
+        except Exception:
+            return default
+
+    def _env_float(
+        self,
+        name: str,
+        default: float
+    ) -> float:
+        try:
+            return float(
+                os.getenv(
+                    name,
+                    str(default)
+                )
+            )
+
+        except Exception:
+            return default
+
+    def _extract_position_contract_id(
+        self,
+        position: dict
+    ) -> str | None:
+        for key in (
+            "contractId",
+            "contract_id",
+            "contractID",
+            "symbolId"
+        ):
+            value = position.get(
+                key
+            )
+
+            if value:
+                return str(
+                    value
+                )
+
+        return None
+
+    def _extract_position_quantity(
+        self,
+        position: dict
+    ) -> int:
+        for key in (
+            "size",
+            "quantity",
+            "qty"
+        ):
+            value = position.get(
+                key
+            )
+
+            try:
+                return abs(
+                    int(
+                        value
+                    )
+                )
+
+            except Exception:
+                continue
+
+        return 0
+
+    def _extract_position_action_side(
+        self,
+        position: dict
+    ) -> str | None:
+        raw_type = position.get(
+            "type"
+        )
+
+        try:
+            numeric_type = int(
+                raw_type
+            )
+
+            if numeric_type == 1:
+                return "BUY"
+
+            if numeric_type == 2:
+                return "SELL"
+
+        except Exception:
+            pass
+
+        text = str(
+            position.get(
+                "side",
+                ""
+            )
+            or position.get(
+                "positionType",
+                ""
+            )
+            or ""
+        ).upper()
+
+        if "LONG" in text or "BUY" in text:
+            return "BUY"
+
+        if "SHORT" in text or "SELL" in text:
+            return "SELL"
+
+        return None
+
+    def _position_matches_contract(
+        self,
+        position: dict,
+        contract: dict
+    ) -> bool:
+        position_contract_id = (
+            self._extract_position_contract_id(
+                position
+            )
+        )
+        contract_id = str(
+            contract.get(
+                "id",
+                ""
+            )
+        )
+        symbol_id = str(
+            contract.get(
+                "symbolId",
+                ""
+            )
+        )
+
+        return position_contract_id in {
+            contract_id,
+            symbol_id
+        }
+
+    def _calculate_position_pnl(
+        self,
+        position: dict,
+        contract: dict,
+        current_price: float | None
+    ) -> float | None:
+        if current_price is None:
+            return None
+
+        entry_price = self._to_float(
+            position.get(
+                "averagePrice"
+            )
+            or position.get(
+                "avgPrice"
+            )
+            or position.get(
+                "entryPrice"
+            )
+        )
+        tick_size = self._to_float(
+            contract.get(
+                "tickSize"
+            )
+        )
+        tick_value = self._to_float(
+            contract.get(
+                "tickValue"
+            )
+        )
+        quantity = self._extract_position_quantity(
+            position
+        )
+        side = self._extract_position_action_side(
+            position
+        )
+
+        if (
+            entry_price is None
+            or tick_size is None
+            or tick_value is None
+            or tick_size <= 0
+            or quantity <= 0
+            or side is None
+        ):
+            return None
+
+        price_delta = (
+            current_price
+            - entry_price
+        )
+
+        if side == "SELL":
+            price_delta = -price_delta
+
+        return (
+            price_delta
+            / tick_size
+            * tick_value
+            * quantity
+        )
+
+    def _opposite_action(
+        self,
+        action: str | None
+    ) -> str | None:
+        normalized = str(
+            action or ""
+        ).upper()
+
+        if normalized == "BUY":
+            return "SELL"
+
+        if normalized == "SELL":
+            return "BUY"
+
+        return None
+
     def _resolve_current_price(
         self,
         quote_data: dict
@@ -290,7 +525,10 @@ class BotService:
                 symbol
             )
 
-        return candidates or [""]
+        return candidates or [
+            "MNQ",
+            ""
+        ]
 
     def _auto_contract_limit(
         self
@@ -1261,15 +1499,31 @@ class BotService:
             )
             daily_loss_limit_source = "RULE_PACK"
 
+        planned_quantity = self._env_int(
+            "AUTO_PLANNED_QUANTITY",
+            1,
+            minimum=1
+        )
+        max_position_quantity = self._env_int(
+            "AUTO_MAX_POSITION_QUANTITY",
+            3,
+            minimum=1
+        )
+
+        planned_quantity = min(
+            planned_quantity,
+            max_position_quantity
+        )
+
         return {
             "account_size": account_size,
-            "planned_quantity": 1,
+            "planned_quantity": planned_quantity,
             "current_mll": current_mll,
             "current_mll_source": current_mll_source,
             "max_risk_per_trade": 100,
             "daily_loss_limit": daily_loss_limit,
             "daily_loss_limit_source": daily_loss_limit_source,
-            "max_position_quantity": 1,
+            "max_position_quantity": max_position_quantity,
             "max_quote_age_seconds": 30,
             "order_type": "MARKET",
             "lookback_hours": 72,
@@ -1426,6 +1680,252 @@ class BotService:
                 else None
             )
         }
+
+    def _build_position_management(
+        self,
+        contract: dict,
+        positions: list,
+        market_gate: dict | None,
+        strategy: dict | None
+    ) -> dict:
+        quote = (
+            market_gate
+            or {}
+        ).get(
+            "quote",
+            {}
+        )
+        current_price = self._to_float(
+            quote.get(
+                "currentPrice"
+            )
+        )
+
+        profit_exit_usd = self._env_float(
+            "POSITION_PROFIT_EXIT_USD",
+            45.0
+        )
+        rescan_loss_usd = abs(
+            self._env_float(
+                "POSITION_RESCAN_LOSS_USD",
+                50.0
+            )
+        )
+        hard_loss_exit_usd = abs(
+            self._env_float(
+                "POSITION_HARD_LOSS_EXIT_USD",
+                100.0
+            )
+        )
+
+        matched_positions = [
+            position
+            for position in positions or []
+            if self._position_matches_contract(
+                position=position,
+                contract=contract
+            )
+        ]
+
+        if not matched_positions:
+            return {
+                "enabled": True,
+                "status": "NO_POSITION",
+                "action": "NONE",
+                "reason": None,
+                "profit_exit_usd": profit_exit_usd,
+                "rescan_loss_usd": rescan_loss_usd,
+                "hard_loss_exit_usd": hard_loss_exit_usd
+            }
+
+        details = []
+        total_pnl = 0.0
+        pnl_available = True
+        primary_side = None
+
+        for position in matched_positions:
+            pnl = self._calculate_position_pnl(
+                position=position,
+                contract=contract,
+                current_price=current_price
+            )
+
+            if pnl is None:
+                pnl_available = False
+            else:
+                total_pnl += pnl
+
+            primary_side = (
+                primary_side
+                or self._extract_position_action_side(
+                    position
+                )
+            )
+
+            details.append(
+                {
+                    "contract_id": (
+                        self._extract_position_contract_id(
+                            position
+                        )
+                    ),
+                    "side": self._extract_position_action_side(
+                        position
+                    ),
+                    "quantity": self._extract_position_quantity(
+                        position
+                    ),
+                    "average_price": position.get(
+                        "averagePrice"
+                    ),
+                    "estimated_pnl": pnl
+                }
+            )
+
+        if not pnl_available:
+            return {
+                "enabled": True,
+                "status": "PENDING",
+                "action": "NONE",
+                "reason": (
+                    "Position P&L could not be calculated from "
+                    "the current quote and position details."
+                ),
+                "current_price": current_price,
+                "positions": details,
+                "profit_exit_usd": profit_exit_usd,
+                "rescan_loss_usd": rescan_loss_usd,
+                "hard_loss_exit_usd": hard_loss_exit_usd
+            }
+
+        if total_pnl >= profit_exit_usd:
+            return {
+                "enabled": True,
+                "status": "PROFIT_EXIT",
+                "action": "EXIT",
+                "estimated_pnl": total_pnl,
+                "current_price": current_price,
+                "positions": details,
+                "reason": (
+                    f"Client profit target reached: "
+                    f"${total_pnl:.2f} >= ${profit_exit_usd:.2f}."
+                ),
+                "profit_exit_usd": profit_exit_usd,
+                "rescan_loss_usd": rescan_loss_usd,
+                "hard_loss_exit_usd": hard_loss_exit_usd
+            }
+
+        if total_pnl <= -hard_loss_exit_usd:
+            return {
+                "enabled": True,
+                "status": "HARD_LOSS_EXIT",
+                "action": "EXIT",
+                "estimated_pnl": total_pnl,
+                "current_price": current_price,
+                "positions": details,
+                "reason": (
+                    f"Client hard loss limit reached: "
+                    f"${total_pnl:.2f} <= -${hard_loss_exit_usd:.2f}."
+                ),
+                "profit_exit_usd": profit_exit_usd,
+                "rescan_loss_usd": rescan_loss_usd,
+                "hard_loss_exit_usd": hard_loss_exit_usd
+            }
+
+        strategy_action = str(
+            (
+                strategy
+                or {}
+            ).get(
+                "action",
+                "WAIT"
+            )
+        ).upper()
+        opposite_action = self._opposite_action(
+            primary_side
+        )
+
+        if (
+            total_pnl <= -rescan_loss_usd
+            and strategy_action == opposite_action
+        ):
+            return {
+                "enabled": True,
+                "status": "REVERSAL_READY",
+                "action": "REVERSE",
+                "reverse_action": opposite_action,
+                "estimated_pnl": total_pnl,
+                "current_price": current_price,
+                "positions": details,
+                "reason": (
+                    f"Client rescan loss threshold reached: "
+                    f"${total_pnl:.2f} <= -${rescan_loss_usd:.2f}; "
+                    f"AI confirmed opposite action {opposite_action}."
+                ),
+                "profit_exit_usd": profit_exit_usd,
+                "rescan_loss_usd": rescan_loss_usd,
+                "hard_loss_exit_usd": hard_loss_exit_usd
+            }
+
+        if total_pnl <= -rescan_loss_usd:
+            return {
+                "enabled": True,
+                "status": "RESCAN_HOLD",
+                "action": "NONE",
+                "estimated_pnl": total_pnl,
+                "current_price": current_price,
+                "positions": details,
+                "reason": (
+                    f"Client rescan loss threshold reached: "
+                    f"${total_pnl:.2f} <= -${rescan_loss_usd:.2f}, "
+                    "but AI did not confirm a reversal."
+                ),
+                "profit_exit_usd": profit_exit_usd,
+                "rescan_loss_usd": rescan_loss_usd,
+                "hard_loss_exit_usd": hard_loss_exit_usd
+            }
+
+        return {
+            "enabled": True,
+            "status": "ACTIVE",
+            "action": "NONE",
+            "estimated_pnl": total_pnl,
+            "current_price": current_price,
+            "positions": details,
+            "reason": None,
+            "profit_exit_usd": profit_exit_usd,
+            "rescan_loss_usd": rescan_loss_usd,
+            "hard_loss_exit_usd": hard_loss_exit_usd
+        }
+
+    def _management_exit_decision(
+        self,
+        reason: str
+    ) -> tuple[dict, dict]:
+        final_decision = {
+            "success": True,
+            "final_status": "ALLOW",
+            "action": "EXIT",
+            "execution_allowed": True,
+            "reason": reason,
+            "decision_version": (
+                "FINAL_DECISION_POSITION_MANAGEMENT_V1"
+            )
+        }
+
+        safety = {
+            "success": True,
+            "safety_status": "PASS",
+            "safe_to_execute": True,
+            "action": "EXIT",
+            "blocks": [],
+            "warnings": [],
+            "safety_version": (
+                "SAFETY_POSITION_MANAGEMENT_V1"
+            )
+        }
+
+        return final_decision, safety
 
     async def _run_decision_safety_workflow(
         self,
@@ -2045,6 +2545,12 @@ class BotService:
         )
 
         execution_guard = None
+        position_management = self._build_position_management(
+            contract=contract,
+            positions=positions,
+            market_gate=market_gate,
+            strategy=strategy
+        )
 
         if daily_profit_lock.get(
             "done_for_day"
@@ -2118,6 +2624,156 @@ class BotService:
                     )
                 )
             )
+
+        elif position_management.get(
+            "action"
+        ) in {
+            "EXIT",
+            "REVERSE"
+        }:
+            management_reason = (
+                position_management.get(
+                    "reason"
+                )
+                or "Client position-management rule triggered."
+            )
+
+            final_decision, safety = self._management_exit_decision(
+                reason=management_reason
+            )
+
+            workflow["final_decision"] = final_decision
+            workflow["safety"] = safety
+            workflow["ready_for_execution"] = True
+
+            close_result = await self.execution_service.execute(
+                account_id=account_id,
+                contract_id=contract_id,
+                final_decision=final_decision,
+                safety_result=safety,
+                contract=contract,
+                dry_run=dry_run,
+                order_type=order_type,
+                confirm_live_execution=(
+                    confirm_live_execution
+                )
+            )
+
+            execution_result = close_result
+
+            if (
+                position_management.get(
+                    "action"
+                )
+                == "REVERSE"
+            ):
+                reverse_action = position_management.get(
+                    "reverse_action"
+                )
+                reverse_decision = {
+                    **workflow.get(
+                        "final_decision",
+                        {}
+                    ),
+                    "success": True,
+                    "final_status": "ALLOW",
+                    "action": reverse_action,
+                    "execution_allowed": True,
+                    "planned_quantity": planned_quantity,
+                    "reason": management_reason,
+                    "strategy": {
+                        "status": "READY",
+                        "action": reverse_action,
+                        "ai_analysis": strategy.get(
+                            "ai_analysis",
+                            {}
+                        ),
+                        "trade_plan": strategy.get(
+                            "trade_plan",
+                            {}
+                        )
+                    },
+                    "decision_version": (
+                        "FINAL_DECISION_POSITION_REVERSAL_V1"
+                    )
+                }
+                reverse_safety = {
+                    "success": True,
+                    "safety_status": "PASS",
+                    "safe_to_execute": True,
+                    "action": reverse_action,
+                    "blocks": [],
+                    "warnings": [
+                        (
+                            "Reverse order allowed only after "
+                            "the close-position request succeeds."
+                        )
+                    ],
+                    "safety_version": (
+                        "SAFETY_POSITION_REVERSAL_V1"
+                    )
+                }
+
+                close_ok = (
+                    dry_run
+                    or close_result.get(
+                        "submitted",
+                        False
+                    )
+                )
+
+                reverse_result = None
+
+                if close_ok:
+                    reverse_result = (
+                        await self.execution_service.execute(
+                            account_id=account_id,
+                            contract_id=contract_id,
+                            final_decision=reverse_decision,
+                            safety_result=reverse_safety,
+                            contract=contract,
+                            dry_run=dry_run,
+                            order_type=order_type,
+                            confirm_live_execution=(
+                                confirm_live_execution
+                            )
+                        )
+                    )
+
+                execution_result = {
+                    "success": True,
+                    "execution_status": (
+                        "REVERSE_SUBMITTED"
+                        if (
+                            close_ok
+                            and reverse_result
+                            and reverse_result.get(
+                                "submitted",
+                                False
+                            )
+                        )
+                        else (
+                            "DRY_RUN_REVERSE_READY"
+                            if dry_run
+                            else "REVERSE_BLOCKED"
+                        )
+                    ),
+                    "submitted": (
+                        bool(
+                            reverse_result.get(
+                                "submitted",
+                                False
+                            )
+                        )
+                        if reverse_result
+                        else False
+                    ),
+                    "dry_run": dry_run,
+                    "action": "REVERSE",
+                    "close_result": close_result,
+                    "reverse_result": reverse_result,
+                    "reason": management_reason
+                }
 
         else:
 
@@ -2374,6 +3030,7 @@ class BotService:
             "market_gate": market_gate,
             "pre_trade_rules": pre_trade_rules,
             "daily_profit_lock": daily_profit_lock,
+            "position_management": position_management,
             "rule": rule,
             "risk": risk,
             "safety": {

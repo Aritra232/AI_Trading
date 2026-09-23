@@ -235,6 +235,33 @@ class AuditService:
             record
         )
 
+    def log_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        session_id = payload.get(
+            "session_id"
+        )
+
+        record = {
+            "event_type": event_type,
+            "timestamp": self._utc_now_iso(),
+            "user_id": (
+                payload.get(
+                    "user_id"
+                )
+                or self._session_user_id(
+                    session_id
+                )
+            ),
+            **payload
+        }
+
+        return self._store(
+            record
+        )
+
     def read_recent(
         self,
         limit: int = 50,

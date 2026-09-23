@@ -328,6 +328,326 @@ def get_autonomous_service(
     return created
 
 
+def _extract_order_id(
+    order: dict
+) -> int | None:
+    for key in (
+        "id",
+        "orderId",
+        "order_id"
+    ):
+        value = order.get(
+            key
+        )
+
+        try:
+            return int(
+                value
+            )
+
+        except Exception:
+            continue
+
+    return None
+
+
+def _is_protective_order(
+    order: dict
+) -> bool:
+    custom_tag = str(
+        order.get(
+            "customTag",
+            ""
+        )
+        or ""
+    ).upper()
+
+    return bool(
+        order.get(
+            "parentOrderId"
+        )
+    ) or custom_tag.endswith(
+        "-SL"
+    ) or custom_tag.endswith(
+        "-TP"
+    )
+
+
+def _extract_position_contract_id(
+    position: dict
+) -> str | None:
+    for key in (
+        "contractId",
+        "contract_id",
+        "contractID",
+        "symbolId"
+    ):
+        value = position.get(
+            key
+        )
+
+        if value:
+            return str(
+                value
+            )
+
+    return None
+
+
+async def _cancel_orders(
+    order_service,
+    account_id: int,
+    orders: list
+) -> dict:
+    responses = []
+
+    for order in orders or []:
+        order_id = _extract_order_id(
+            order
+        )
+
+        if order_id is None:
+            responses.append(
+                {
+                    "order": order,
+                    "success": False,
+                    "error": "Order ID was not found."
+                }
+            )
+            continue
+
+        response = await order_service.cancel_order(
+            account_id=account_id,
+            order_id=order_id
+        )
+
+        responses.append(
+            {
+                "order_id": order_id,
+                "customTag": order.get(
+                    "customTag"
+                ),
+                "success": bool(
+                    response.get(
+                        "success",
+                        False
+                    )
+                ),
+                "response": response
+            }
+        )
+
+    return {
+        "requested": len(
+            orders or []
+        ),
+        "success_count": sum(
+            1
+            for item in responses
+            if item.get(
+                "success"
+            )
+        ),
+        "responses": responses
+    }
+
+
+async def _close_positions(
+    position_service,
+    account_id: int,
+    positions: list
+) -> dict:
+    responses = []
+    seen_contracts = set()
+
+    for position in positions or []:
+        contract_id = _extract_position_contract_id(
+            position
+        )
+
+        if (
+            not contract_id
+            or contract_id in seen_contracts
+        ):
+            continue
+
+        seen_contracts.add(
+            contract_id
+        )
+
+        response = await position_service.close_contract_position(
+            account_id=account_id,
+            contract_id=contract_id
+        )
+
+        responses.append(
+            {
+                "contract_id": contract_id,
+                "success": bool(
+                    response.get(
+                        "success",
+                        False
+                    )
+                ),
+                "response": response
+            }
+        )
+
+    return {
+        "requested": len(
+            responses
+        ),
+        "success_count": sum(
+            1
+            for item in responses
+            if item.get(
+                "success"
+            )
+        ),
+        "responses": responses
+    }
+
+
+async def _emergency_flatten_account(
+    runtime: dict,
+    account_id: int,
+    reason: str
+) -> dict:
+    orders_before = await runtime[
+        "order_service"
+    ].get_open_orders(
+        account_id=account_id
+    )
+    open_orders = orders_before.get(
+        "orders",
+        []
+    )
+
+    non_protective_orders = [
+        order
+        for order in open_orders
+        if not _is_protective_order(
+            order
+        )
+    ]
+
+    pending_cancel_result = await _cancel_orders(
+        order_service=runtime[
+            "order_service"
+        ],
+        account_id=account_id,
+        orders=non_protective_orders
+    )
+
+    positions_before = await runtime[
+        "position_service"
+    ].get_open_positions(
+        account_id=account_id
+    )
+    positions = positions_before.get(
+        "positions",
+        []
+    )
+
+    close_result = await _close_positions(
+        position_service=runtime[
+            "position_service"
+        ],
+        account_id=account_id,
+        positions=positions
+    )
+
+    close_complete = (
+        close_result.get(
+            "requested",
+            0
+        )
+        == close_result.get(
+            "success_count",
+            0
+        )
+    )
+
+    orders_after_close = await runtime[
+        "order_service"
+    ].get_open_orders(
+        account_id=account_id
+    )
+    remaining_orders = orders_after_close.get(
+        "orders",
+        []
+    )
+
+    if close_complete:
+        final_cancel_orders = remaining_orders
+        skipped_orders = []
+
+    else:
+        final_cancel_orders = [
+            order
+            for order in remaining_orders
+            if not _is_protective_order(
+                order
+            )
+        ]
+        skipped_orders = [
+            order
+            for order in remaining_orders
+            if _is_protective_order(
+                order
+            )
+        ]
+
+    final_cancel_result = await _cancel_orders(
+        order_service=runtime[
+            "order_service"
+        ],
+        account_id=account_id,
+        orders=final_cancel_orders
+    )
+
+    positions_after = await runtime[
+        "position_service"
+    ].get_open_positions(
+        account_id=account_id
+    )
+    orders_after = await runtime[
+        "order_service"
+    ].get_open_orders(
+        account_id=account_id
+    )
+
+    return {
+        "success": True,
+        "flatten_version": "EMERGENCY_FLATTEN_V1",
+        "account_id": account_id,
+        "reason": reason,
+        "orders_before": orders_before,
+        "positions_before": positions_before,
+        "pending_entry_cancel": pending_cancel_result,
+        "position_close": close_result,
+        "final_order_cancel": final_cancel_result,
+        "protective_orders_skipped": skipped_orders,
+        "positions_after": positions_after,
+        "orders_after": orders_after,
+        "flat": (
+            len(
+                positions_after.get(
+                    "positions",
+                    []
+                )
+            )
+            == 0
+        ),
+        "open_orders_count_after": len(
+            orders_after.get(
+                "orders",
+                []
+            )
+        )
+    }
+
+
 # =========================
 # System
 # =========================
@@ -2653,13 +2973,127 @@ async def stop_bot(
     tags=["Bot"]
 )
 async def enable_bot_kill_switch(
-    reason: str = "Manual emergency stop."
+    reason: str = "Manual emergency stop.",
+    session_id: str | None = None,
+    account_id: int | None = None,
+    flatten: bool = True,
+    stop_loop: bool = True
 ):
     try:
-        return bot_state_service.enable_kill_switch(
+        runtime = None
+        state_service = bot_state_service
+        autonomous_service = None
+
+        if session_id:
+            runtime = build_runtime(
+                session_id=session_id
+            )
+            state_service = get_bot_state_service(
+                session_id
+            )
+            autonomous_service = get_autonomous_service(
+                session_id=session_id,
+                runtime=runtime
+            )
+
+        if (
+            stop_loop
+            and autonomous_service is not None
+        ):
+            await autonomous_service.stop()
+
+        state = state_service.enable_kill_switch(
             reason=reason,
             updated_by="api"
         )
+
+        resolved_account_id = account_id
+
+        if (
+            resolved_account_id is None
+            and state.get(
+                "loop",
+                {}
+            ).get(
+                "config"
+            )
+        ):
+            resolved_account_id = state[
+                "loop"
+            ][
+                "config"
+            ].get(
+                "account_id"
+            )
+
+        if (
+            resolved_account_id is None
+            and state.get(
+                "last_run",
+                {}
+            )
+        ):
+            resolved_account_id = state[
+                "last_run"
+            ].get(
+                "account_id"
+            )
+
+        flatten_result = {
+            "success": False,
+            "skipped": True,
+            "reason": (
+                "flatten=false"
+                if not flatten
+                else (
+                    "session_id is required for emergency flatten."
+                    if not session_id
+                    else "account_id was not provided or found in bot state."
+                )
+            )
+        }
+
+        if (
+            flatten
+            and session_id
+            and resolved_account_id is not None
+        ):
+            if runtime is None:
+                runtime = build_runtime(
+                    session_id=session_id
+                )
+
+            flatten_result = await _emergency_flatten_account(
+                runtime=runtime,
+                account_id=int(
+                    resolved_account_id
+                ),
+                reason=reason
+            )
+
+        audit_result = audit_service.log_event(
+            event_type="KILL_SWITCH_ENABLED",
+            payload={
+                "session_id": session_id,
+                "account_id": resolved_account_id,
+                "reason": reason,
+                "flatten_requested": flatten,
+                "stop_loop_requested": stop_loop,
+                "state": state,
+                "flatten": flatten_result
+            }
+        )
+
+        return {
+            **state,
+            "emergency_stop": {
+                "stop_loop_requested": stop_loop,
+                "flatten_requested": flatten,
+                "account_id": resolved_account_id,
+                "flatten": flatten_result,
+                "audit": audit_result
+            }
+        }
 
     except Exception as exc:
 
