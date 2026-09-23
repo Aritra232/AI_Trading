@@ -89,6 +89,97 @@ class SafetyService:
 
         return total
 
+    def _extract_position_contract_id(
+        self,
+        position: dict
+    ) -> Optional[str]:
+        for key in (
+            "contractId",
+            "contract_id",
+            "contractID",
+            "symbolId"
+        ):
+            value = position.get(
+                key
+            )
+
+            if value:
+                return str(
+                    value
+                )
+
+        return None
+
+    def _get_contract_position_quantity(
+        self,
+        positions: list,
+        contract: dict | None
+    ) -> int:
+        if not contract:
+            return self._get_total_position_quantity(
+                positions
+            )
+
+        contract_ids = {
+            str(
+                contract.get(
+                    "id",
+                    ""
+                )
+            ),
+            str(
+                contract.get(
+                    "symbolId",
+                    ""
+                )
+            )
+        }
+
+        return self._get_total_position_quantity(
+            [
+                position
+                for position in positions or []
+                if self._extract_position_contract_id(
+                    position
+                )
+                in contract_ids
+            ]
+        )
+
+    def _is_protective_order(
+        self,
+        order: dict
+    ) -> bool:
+        custom_tag = str(
+            order.get(
+                "customTag",
+                ""
+            )
+            or ""
+        ).upper()
+
+        return bool(
+            order.get(
+                "parentOrderId"
+            )
+        ) or custom_tag.endswith(
+            "-SL"
+        ) or custom_tag.endswith(
+            "-TP"
+        )
+
+    def _get_non_protective_open_orders(
+        self,
+        open_orders: list
+    ) -> list:
+        return [
+            order
+            for order in open_orders or []
+            if not self._is_protective_order(
+                order
+            )
+        ]
+
     def evaluate_safety(
         self,
         final_decision: dict,
@@ -188,9 +279,19 @@ class SafetyService:
             []
         )
 
+        contract = trading_state.get(
+            "contract"
+        )
+
         open_orders = trading_state.get(
             "open_orders",
             []
+        )
+
+        non_protective_open_orders = (
+            self._get_non_protective_open_orders(
+                open_orders
+            )
         )
 
         if not account:
@@ -271,7 +372,7 @@ class SafetyService:
                 "BUY",
                 "SELL"
             }
-            and len(open_orders) > 0
+            and len(non_protective_open_orders) > 0
         ):
 
             blocks.append(
@@ -298,8 +399,9 @@ class SafetyService:
         # =========================
 
         current_position_quantity = (
-            self._get_total_position_quantity(
-                positions
+            self._get_contract_position_quantity(
+                positions=positions,
+                contract=contract
             )
         )
 

@@ -106,6 +106,40 @@ class StrategyService:
 
         return normalized
 
+    def _is_protective_order(
+        self,
+        order: dict
+    ) -> bool:
+        custom_tag = str(
+            order.get(
+                "customTag",
+                ""
+            )
+            or ""
+        ).upper()
+
+        return bool(
+            order.get(
+                "parentOrderId"
+            )
+        ) or custom_tag.endswith(
+            "-SL"
+        ) or custom_tag.endswith(
+            "-TP"
+        )
+
+    def _non_protective_open_orders(
+        self,
+        open_orders: List[dict]
+    ) -> List[dict]:
+        return [
+            order
+            for order in open_orders or []
+            if not self._is_protective_order(
+                order
+            )
+        ]
+
     def select_contract_for_auto_trading(
         self,
         contracts: List[dict],
@@ -142,10 +176,12 @@ Selection priorities:
 
 1. Only choose a contract from the provided list.
 2. Prefer active contracts.
-3. Prefer liquid, common futures instruments suitable for evaluation.
-4. Prefer smaller risk instruments when two choices are similar.
-5. Do not invent symbols or contract IDs.
-6. If the metadata is not enough to identify an advantage, choose the
+3. Prefer MNQ / Micro E-mini Nasdaq-100 when it is available and
+   active because the client requested it for better profit potential.
+4. Prefer liquid, common futures instruments suitable for evaluation.
+5. Prefer smaller risk instruments when two choices are similar.
+6. Do not invent symbols or contract IDs.
+7. If the metadata is not enough to identify an advantage, choose the
    safest commonly traded contract from the available list.
 
 Return JSON only with this exact shape:
@@ -647,6 +683,11 @@ Return JSON only with this exact shape:
         )
 
         market_depth = None
+        non_protective_orders = (
+            self._non_protective_open_orders(
+                open_orders
+            )
+        )
 
         if depth:
             market_depth = depth.get(
@@ -704,7 +745,12 @@ Return JSON only with this exact shape:
 
             "positions": positions,
 
-            "open_orders": open_orders
+            "open_orders": non_protective_orders,
+
+            "protective_orders_count": (
+                len(open_orders or [])
+                - len(non_protective_orders)
+            )
         }
 
         # =========================
@@ -720,6 +766,13 @@ Analyze only the supplied market and account-state data.
 Your responsibility is to produce a structured trading
 candidate, not to bypass risk controls.
 
+The system is running in active evaluation mode. Your job is not
+to wait for a perfect textbook setup; it is to identify reasonable,
+small-risk opportunities when the supplied data supports a
+defensible entry with a defined stop-loss and take-profit. The
+deterministic rule, risk, and safety layers will block anything
+unsafe after your response.
+
 Possible actions:
 BUY
 SELL
@@ -731,11 +784,14 @@ Important rules:
 1. Do not assume missing information.
 2. If data is insufficient or contradictory, return WAIT.
 3. Do not increase risk to recover previous losses.
-4. If there is already an open position, determine whether
-   the appropriate action is HOLD/WAIT or EXIT. Do not create
-   a duplicate entry.
-5. If there is an existing open order, do not create another
-   duplicate entry.
+4. If there is already an open position, you may return WAIT,
+   EXIT, or an opposite BUY/SELL reversal only when the supplied
+   data shows the current position is wrong. You may also return
+   a same-direction BUY/SELL only when adding another contract is
+   independently justified by a fresh setup.
+5. Protective stop-loss/take-profit bracket orders for an existing
+   position are not duplicate entries. Non-protective open entry
+   orders are duplicate risk and should not be repeated.
 6. Use current quote, historical OHLCV structure, and market
    depth when available.
 7. Produce entry, stop-loss, and take-profit prices only when
@@ -743,6 +799,34 @@ Important rules:
 8. The output will be independently checked by deterministic
    rule, risk, and safety engines.
 9. Never claim guaranteed profit or guaranteed evaluation pass.
+
+Trade-selection guidance:
+
+1. BUY/SELL is acceptable with LIMITED data quality when the
+   realtime quote is fresh, recent OHLCV structure is usable, and
+   a clear invalidation level exists for the stop-loss.
+2. Do not reject a setup solely because market depth is thin,
+   one-sided, or unavailable. Treat depth as supporting evidence,
+   not a hard requirement, unless it directly contradicts price.
+3. Do not reject a setup solely because price has moved. A move is
+   tradable if there is a breakout, pullback continuation, reversal
+   confirmation, or failed-break structure with clear risk.
+4. Avoid true chasing: return WAIT when entry would have no nearby
+   invalidation point, the stop would be arbitrary, or reward-to-risk
+   is poor.
+5. Prefer one-contract, defined-risk trades over indefinite WAIT
+   when bias, structure, and risk plan align.
+6. Reasonable BUY templates include confirmed breakout continuation,
+   pullback holding above support, reclaim of prior resistance, or
+   bullish reversal from a session low.
+7. Reasonable SELL templates include confirmed breakdown continuation,
+   pullback failing below resistance, rejection of prior support, or
+   bearish reversal from a session high.
+8. For BUY/SELL, use confidence that reflects setup quality. Prefer
+   BUY/SELL when confidence is about 0.55 or higher and the stop-loss
+   and take-profit are logically placed.
+9. Return WAIT when the market is stale, conflicting, range-bound
+   without edge, or lacks a valid stop-loss/take-profit plan.
 
 Return JSON only with this exact shape:
 
@@ -820,7 +904,7 @@ Return JSON only with this exact shape:
         # Duplicate Protection
         # =========================
 
-        if open_orders:
+        if non_protective_orders:
             return self._fail_closed_strategy(
                 reason=(
                     "Existing open order detected. "
@@ -906,10 +990,14 @@ Return JSON only with this exact shape:
                     positions
                 ),
                 "has_open_orders": bool(
-                    open_orders
+                    non_protective_orders
                 ),
                 "duplicate_entry_blocked": bool(
-                    open_orders
+                    non_protective_orders
+                ),
+                "protective_orders_count": (
+                    len(open_orders or [])
+                    - len(non_protective_orders)
                 )
             },
 
