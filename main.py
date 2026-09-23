@@ -1,5 +1,8 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import asyncio
+import os
 
 from service.topstep_service import TopstepService
 from service.account_service import AccountService
@@ -29,6 +32,18 @@ from service.topstep_session_service import TopstepSessionService
 app = FastAPI(
     title="TopstepX API Test",
     version="1.4.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "*"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -409,20 +424,46 @@ async def auth_test(
         )
 
 
+class TopstepLoginRequest(BaseModel):
+    user_id: str | None = None
+    topstep_username: str | None = None
+    topstep_api_key: str | None = None
+
+
 @app.post(
     "/topstep/session/login",
     tags=["Authentication"]
 )
 async def login_topstep_session(
-    user_id: str,
-    topstep_username: str,
-    topstep_api_key: str
+    payload: TopstepLoginRequest | None = None,
+    user_id: str | None = None,
+    topstep_username: str | None = None,
+    topstep_api_key: str | None = None
 ):
     try:
+        resolved_user_id = (
+            (payload.user_id if payload and payload.user_id else None)
+            or user_id
+            or "dashboard_user"
+        )
+        resolved_username = (
+            (payload.topstep_username if payload and payload.topstep_username else None)
+            or topstep_username
+            or os.getenv("TOPSTEP_USERNAME", "").strip()
+        )
+        resolved_api_key = (
+            (payload.topstep_api_key if payload and payload.topstep_api_key else None)
+            or topstep_api_key
+            or os.getenv("TOPSTEP_API_KEY_PRIMARY", "").strip()
+        )
+
+        if not resolved_username or not resolved_api_key:
+            raise ValueError("Topstep username and API key are required.")
+
         login_result = await topstep_session_service.login(
-            username=topstep_username,
-            api_key=topstep_api_key,
-            user_id=user_id
+            username=resolved_username,
+            api_key=resolved_api_key,
+            user_id=resolved_user_id
         )
 
         runtime = build_runtime(
@@ -451,6 +492,77 @@ async def login_topstep_session(
 
         return {
             **login_result,
+            "accounts": accounts,
+            "accounts_database": accounts_database
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=str(exc)
+        )
+
+
+@app.get(
+    "/topstep/session/default",
+    tags=["Authentication"]
+)
+@app.post(
+    "/topstep/session/default",
+    tags=["Authentication"]
+)
+async def get_or_create_default_session():
+    """
+    Returns an existing active Topstep session or automatically initializes one
+    using the configured .env credentials (TOPSTEP_USERNAME & TOPSTEP_API_KEY_PRIMARY).
+    """
+    try:
+        for session_id, s_data in topstep_session_service.sessions.items():
+            client = s_data.get("client")
+            if client and getattr(client, "token", None):
+                runtime = build_runtime(session_id=session_id)
+                accounts_result = await runtime["account_service"].get_accounts()
+                accounts = accounts_result.get("accounts", [])
+                return {
+                    "success": True,
+                    "session_id": session_id,
+                    "user_id": s_data.get("user_id", "dashboard_user"),
+                    "username": s_data.get("username", ""),
+                    "token_received": True,
+                    "reused": True,
+                    "accounts": accounts
+                }
+
+        default_user = "dashboard_user"
+        default_username = os.getenv("TOPSTEP_USERNAME", "").strip()
+        default_key = os.getenv("TOPSTEP_API_KEY_PRIMARY", "").strip()
+
+        if not default_username or not default_key:
+            raise ValueError(
+                "TOPSTEP_USERNAME or TOPSTEP_API_KEY_PRIMARY is missing in .env"
+            )
+
+        login_result = await topstep_session_service.login(
+            username=default_username,
+            api_key=default_key,
+            user_id=default_user
+        )
+
+        runtime = build_runtime(
+            session_id=login_result["session_id"]
+        )
+
+        accounts_result = await runtime["account_service"].get_accounts()
+        accounts = accounts_result.get("accounts", [])
+
+        accounts_database = topstep_session_service.save_accounts(
+            session_id=login_result["session_id"],
+            accounts=accounts
+        )
+
+        return {
+            **login_result,
+            "reused": False,
             "accounts": accounts,
             "accounts_database": accounts_database
         }
@@ -2653,9 +2765,18 @@ async def stop_bot(
     tags=["Bot"]
 )
 async def enable_bot_kill_switch(
-    reason: str = "Manual emergency stop."
+    reason: str = "Manual emergency stop.",
+    session_id: str | None = None
 ):
     try:
+        if session_id:
+            try:
+                service = get_autonomous_service(session_id=session_id)
+                if service.is_running():
+                    await service.stop()
+            except Exception:
+                pass
+
         return bot_state_service.enable_kill_switch(
             reason=reason,
             updated_by="api"
@@ -2674,7 +2795,8 @@ async def enable_bot_kill_switch(
     tags=["Bot"]
 )
 async def disable_bot_kill_switch(
-    reason: str = "Manual reset."
+    reason: str = "Manual reset.",
+    session_id: str | None = None
 ):
     try:
         return bot_state_service.disable_kill_switch(
