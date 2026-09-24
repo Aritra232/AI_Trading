@@ -790,6 +790,113 @@ class TopstepLoginRequest(BaseModel):
     topstep_api_key: str | None = None
 
 
+def _topstep_api_key_candidates(
+    explicit_api_key: str | None = None
+) -> list[tuple[str, str]]:
+    candidates = []
+    seen = set()
+
+    sources = [
+        (
+            "REQUEST",
+            explicit_api_key
+        ),
+        (
+            "TOPSTEP_API_KEY_PRIMARY",
+            os.getenv(
+                "TOPSTEP_API_KEY_PRIMARY",
+                ""
+            )
+        ),
+        (
+            "TOPSTEP_API_KEY_SECONDARY",
+            os.getenv(
+                "TOPSTEP_API_KEY_SECONDARY",
+                ""
+            )
+        )
+    ]
+
+    for source, value in sources:
+        api_key = str(
+            value or ""
+        ).strip()
+
+        if (
+            not api_key
+            or api_key in seen
+        ):
+            continue
+
+        seen.add(
+            api_key
+        )
+        candidates.append(
+            (
+                source,
+                api_key
+            )
+        )
+
+    return candidates
+
+
+async def _login_topstep_with_key_fallback(
+    username: str,
+    user_id: str,
+    explicit_api_key: str | None = None
+) -> dict:
+    if not username:
+        raise ValueError(
+            "Topstep username is required."
+        )
+
+    candidates = _topstep_api_key_candidates(
+        explicit_api_key=explicit_api_key
+    )
+
+    if not candidates:
+        raise ValueError(
+            (
+                "Topstep API key is required. Set "
+                "TOPSTEP_API_KEY_PRIMARY or "
+                "TOPSTEP_API_KEY_SECONDARY in .env."
+            )
+        )
+
+    failures = []
+
+    for source, api_key in candidates:
+        try:
+            login_result = await topstep_session_service.login(
+                username=username,
+                api_key=api_key,
+                user_id=user_id
+            )
+
+            return {
+                **login_result,
+                "api_key_source": source
+            }
+
+        except Exception as exc:
+            failures.append(
+                {
+                    "source": source,
+                    "error": str(
+                        exc
+                    )
+                }
+            )
+
+    raise RuntimeError(
+        {
+            "message": "Topstep authentication failed for all configured API keys.",
+            "attempts": failures
+        }
+    )
+
+
 @app.post(
     "/topstep/session/login",
     tags=["Authentication"]
@@ -811,19 +918,18 @@ async def login_topstep_session(
             or topstep_username
             or os.getenv("TOPSTEP_USERNAME", "").strip()
         )
-        resolved_api_key = (
+        explicit_api_key = (
             (payload.topstep_api_key if payload and payload.topstep_api_key else None)
             or topstep_api_key
-            or os.getenv("TOPSTEP_API_KEY_PRIMARY", "").strip()
         )
 
-        if not resolved_username or not resolved_api_key:
-            raise ValueError("Topstep username and API key are required.")
+        if not resolved_username:
+            raise ValueError("Topstep username is required.")
 
-        login_result = await topstep_session_service.login(
+        login_result = await _login_topstep_with_key_fallback(
             username=resolved_username,
-            api_key=resolved_api_key,
-            user_id=resolved_user_id
+            user_id=resolved_user_id,
+            explicit_api_key=explicit_api_key
         )
 
         runtime = build_runtime(
@@ -895,16 +1001,14 @@ async def get_or_create_default_session():
 
         default_user = "dashboard_user"
         default_username = os.getenv("TOPSTEP_USERNAME", "").strip()
-        default_key = os.getenv("TOPSTEP_API_KEY_PRIMARY", "").strip()
 
-        if not default_username or not default_key:
+        if not default_username:
             raise ValueError(
-                "TOPSTEP_USERNAME or TOPSTEP_API_KEY_PRIMARY is missing in .env"
+                "TOPSTEP_USERNAME is missing in .env"
             )
 
-        login_result = await topstep_session_service.login(
+        login_result = await _login_topstep_with_key_fallback(
             username=default_username,
-            api_key=default_key,
             user_id=default_user
         )
 
