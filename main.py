@@ -3224,7 +3224,11 @@ async def disable_bot_kill_switch(
     session_id: str | None = None
 ):
     try:
-        return bot_state_service.disable_kill_switch(
+        state_service = bot_state_service
+        if session_id:
+            state_service = get_bot_state_service(session_id)
+
+        return state_service.disable_kill_switch(
             reason=reason,
             updated_by="api"
         )
