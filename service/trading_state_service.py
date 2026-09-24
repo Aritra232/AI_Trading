@@ -26,6 +26,117 @@ class TradingStateService:
         self.order_service = order_service
         self.realtime_service = realtime_service
 
+    def _account_update_items(
+        self,
+        update
+    ) -> list[dict]:
+        if isinstance(
+            update,
+            list
+        ):
+            return [
+                item
+                for item in update
+                if isinstance(
+                    item,
+                    dict
+                )
+            ]
+
+        if not isinstance(
+            update,
+            dict
+        ):
+            return []
+
+        for key in (
+            "accounts",
+            "data"
+        ):
+            value = update.get(
+                key
+            )
+
+            if isinstance(
+                value,
+                list
+            ):
+                return [
+                    item
+                    for item in value
+                    if isinstance(
+                        item,
+                        dict
+                    )
+                ]
+
+            if isinstance(
+                value,
+                dict
+            ):
+                return [
+                    value
+                ]
+
+        return [
+            update
+        ]
+
+    def _account_update_id(
+        self,
+        update: dict
+    ) -> int | None:
+        for key in (
+            "id",
+            "accountId",
+            "accountID",
+            "account_id"
+        ):
+            value = update.get(
+                key
+            )
+
+            try:
+                return int(
+                    value
+                )
+
+            except Exception:
+                continue
+
+        return None
+
+    def _merge_realtime_account_update(
+        self,
+        account: dict | None,
+        update
+    ) -> dict | None:
+        if not account:
+            return account
+
+        account_id = account.get(
+            "id"
+        )
+
+        for item in self._account_update_items(
+            update
+        ):
+            update_id = self._account_update_id(
+                item
+            )
+
+            if (
+                update_id is not None
+                and update_id == account_id
+            ):
+                return {
+                    **account,
+                    **item,
+                    "realtime_account_update": item
+                }
+
+        return account
+
     async def get_trading_state(
         self,
         account_id: int,
@@ -122,6 +233,13 @@ class TradingStateService:
         realtime_data = realtime_result.get(
             "data",
             {}
+        )
+
+        selected_account = self._merge_realtime_account_update(
+            account=selected_account,
+            update=realtime_data.get(
+                "account"
+            )
         )
 
         # =========================

@@ -449,6 +449,117 @@ def _extract_account_mll(
     )
 
 
+def _account_update_items(
+    update
+) -> list[dict]:
+    if isinstance(
+        update,
+        list
+    ):
+        return [
+            item
+            for item in update
+            if isinstance(
+                item,
+                dict
+            )
+        ]
+
+    if not isinstance(
+        update,
+        dict
+    ):
+        return []
+
+    for key in (
+        "accounts",
+        "data"
+    ):
+        value = update.get(
+            key
+        )
+
+        if isinstance(
+            value,
+            list
+        ):
+            return [
+                item
+                for item in value
+                if isinstance(
+                    item,
+                    dict
+                )
+            ]
+
+        if isinstance(
+            value,
+            dict
+        ):
+            return [
+                value
+            ]
+
+    return [
+        update
+    ]
+
+
+def _account_update_id(
+    update: dict
+) -> int | None:
+    for key in (
+        "id",
+        "accountId",
+        "accountID",
+        "account_id"
+    ):
+        value = update.get(
+            key
+        )
+
+        try:
+            return int(
+                value
+            )
+
+        except Exception:
+            continue
+
+    return None
+
+
+def _merge_realtime_account_update(
+    account: dict,
+    update
+) -> dict:
+    if not account:
+        return account
+
+    account_id = account.get(
+        "id"
+    )
+
+    for item in _account_update_items(
+        update
+    ):
+        update_id = _account_update_id(
+            item
+        )
+
+        if (
+            update_id is not None
+            and update_id == account_id
+        ):
+            return {
+                **account,
+                **item,
+                "realtime_account_update": item
+            }
+
+    return account
+
+
 async def _cancel_orders(
     order_service,
     account_id: int,
@@ -1482,6 +1593,13 @@ async def get_dashboard_summary(
             "user_id"
         )
 
+        if auto_start_realtime:
+            await runtime[
+                "realtime_service"
+            ].start_user_hub(
+                account_id=account_id
+            )
+
         market_task = runtime[
             "market_status_service"
         ].get_status(
@@ -1547,6 +1665,20 @@ async def get_dashboard_summary(
                 "evaluation",
                 evaluation_task
             )
+        )
+
+        realtime_account_update = runtime[
+            "realtime_service"
+        ].get_latest_data().get(
+            "data",
+            {}
+        ).get(
+            "account"
+        )
+
+        selected_account = _merge_realtime_account_update(
+            account=selected_account,
+            update=realtime_account_update
         )
 
         rule_pack = rule_service.get_rule_pack(
@@ -1733,6 +1865,13 @@ async def get_live_readiness(
                 f"Account {account_id} not found."
             )
 
+        if auto_start_realtime:
+            await runtime[
+                "realtime_service"
+            ].start_user_hub(
+                account_id=account_id
+            )
+
         requested_symbol = symbol
         symbol_selection = None
         resolved_symbol = symbol
@@ -1818,6 +1957,20 @@ async def get_live_readiness(
                 "evaluation",
                 evaluation_task
             )
+        )
+
+        realtime_account_update = runtime[
+            "realtime_service"
+        ].get_latest_data().get(
+            "data",
+            {}
+        ).get(
+            "account"
+        )
+
+        selected_account = _merge_realtime_account_update(
+            account=selected_account,
+            update=realtime_account_update
         )
 
         rule_pack = rule_service.get_rule_pack(
