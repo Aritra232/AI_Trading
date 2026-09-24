@@ -169,10 +169,20 @@ class RiskService:
         # Final Status
         # =========================
 
+        non_blocking_warnings = {
+            "Current Maximum Loss Limit was not provided."
+        }
+
+        blocking_warnings = [
+            warning
+            for warning in warnings
+            if warning not in non_blocking_warnings
+        ]
+
         if violations:
             status = "BLOCK"
 
-        elif warnings:
+        elif blocking_warnings:
             status = "REVIEW"
 
         else:

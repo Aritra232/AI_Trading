@@ -409,6 +409,46 @@ def _extract_position_contract_id(
     return None
 
 
+def _extract_account_number(
+    account: dict,
+    keys: tuple[str, ...]
+) -> float | None:
+    for key in keys:
+        value = account.get(
+            key
+        )
+
+        if value is None:
+            continue
+
+        try:
+            return float(
+                value
+            )
+
+        except Exception:
+            continue
+
+    return None
+
+
+def _extract_account_mll(
+    account: dict
+) -> float | None:
+    return _extract_account_number(
+        account,
+        (
+            "currentMll",
+            "currentMLL",
+            "mll",
+            "maximumLossLimit",
+            "maxLossLimit",
+            "trailingThreshold",
+            "liquidationThreshold"
+        )
+    )
+
+
 async def _cancel_orders(
     order_service,
     account_id: int,
@@ -1411,14 +1451,16 @@ async def get_dashboard_summary(
             enforce_daily_profit_cap=True
         )
 
+        current_mll = _extract_account_mll(
+            selected_account
+        )
+
         rules = rule_service.evaluate_rules(
             account=selected_account,
             account_size=account_size,
             symbol=symbol,
             planned_quantity=planned_quantity,
-            current_mll=rule_pack.get(
-                "maximum_loss_limit_floor"
-            ),
+            current_mll=current_mll,
             best_day_profit=evaluation_progress.get(
                 "best_day_profit"
             ),
@@ -1680,14 +1722,16 @@ async def get_live_readiness(
             enforce_daily_profit_cap=True
         )
 
+        current_mll = _extract_account_mll(
+            selected_account
+        )
+
         rules = rule_service.evaluate_rules(
             account=selected_account,
             account_size=account_size,
             symbol=resolved_symbol,
             planned_quantity=planned_quantity,
-            current_mll=rule_pack.get(
-                "maximum_loss_limit_floor"
-            ),
+            current_mll=current_mll,
             best_day_profit=evaluation_progress.get(
                 "best_day_profit"
             ),

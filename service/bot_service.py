@@ -1472,12 +1472,7 @@ class BotService:
         current_mll_source = "ACCOUNT"
 
         if current_mll is None:
-            current_mll = float(
-                rules[
-                    "maximum_loss_limit_floor"
-                ]
-            )
-            current_mll_source = "RULE_PACK_FLOOR"
+            current_mll_source = "ACCOUNT_UNAVAILABLE"
 
         daily_loss_limit = self._extract_number(
             account,
