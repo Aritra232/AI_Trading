@@ -341,6 +341,22 @@ class AutonomousBotService:
             15
         )
 
+        if max_position_quantity is None:
+            max_position_quantity = (
+                self.bot_service._env_int(
+                    "AUTO_MAX_POSITION_QUANTITY",
+                    3,
+                    minimum=1
+                )
+            )
+
+        planned_quantity = (
+            self.bot_service._normalize_planned_quantity(
+                planned_quantity=planned_quantity,
+                max_position_quantity=max_position_quantity
+            )
+        )
+
         if self.is_running():
             status = self.status()
 

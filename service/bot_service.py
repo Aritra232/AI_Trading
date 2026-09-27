@@ -235,6 +235,265 @@ class BotService:
 
         return None
 
+    def _extract_position_root_symbol(
+        self,
+        position: dict
+    ) -> str | None:
+        for key in (
+            "symbolId",
+            "contractId",
+            "contract_id",
+            "contractID"
+        ):
+            value = str(
+                position.get(
+                    key,
+                    ""
+                )
+                or ""
+            ).strip().upper()
+
+            if not value:
+                continue
+
+            parts = value.split(".")
+
+            if (
+                key == "symbolId"
+                and parts
+            ):
+                return parts[-1]
+
+            if len(parts) >= 3:
+                return parts[-2]
+
+            if len(parts) >= 1:
+                return parts[-1]
+
+        for key in (
+            "contractDisplayName",
+            "contractName",
+            "symbol",
+            "name"
+        ):
+            value = str(
+                position.get(
+                    key,
+                    ""
+                )
+                or ""
+            ).strip().upper().lstrip("/")
+
+            if not value:
+                continue
+
+            match = re.match(
+                r"^([A-Z0-9]+?)[FGHJKMNQUVXZ]\d{1,2}$",
+                value
+            )
+
+            if match:
+                return match.group(1)
+
+            return value
+
+        return None
+
+    def _position_exposure_by_root(
+        self,
+        positions: list
+    ) -> dict:
+        exposure = {}
+
+        for position in positions or []:
+            root = self._extract_position_root_symbol(
+                position
+            )
+
+            if not root:
+                continue
+
+            exposure[root] = (
+                exposure.get(
+                    root,
+                    0
+                )
+                + self._extract_position_quantity(
+                    position
+                )
+            )
+
+        return exposure
+
+    def _position_field_pnl(
+        self,
+        position: dict
+    ) -> float | None:
+        for key in (
+            "profitAndLoss",
+            "profitLoss",
+            "pnl",
+            "P&L",
+            "unrealizedPnl",
+            "unrealizedPnL"
+        ):
+            value = self._to_float(
+                position.get(
+                    key
+                )
+            )
+
+            if value is not None:
+                return value
+
+        return None
+
+    def _position_age_hours(
+        self,
+        position: dict
+    ) -> float | None:
+        for key in (
+            "creationTimestamp",
+            "createdAt",
+            "created_at",
+            "openTime",
+            "timestamp",
+            "time"
+        ):
+            age_seconds = self._age_seconds(
+                position.get(
+                    key
+                )
+            )
+
+            if age_seconds is not None:
+                return age_seconds / 3600
+
+        return None
+
+    def _root_max_position_quantity(
+        self,
+        root_symbol: str | None,
+        default_max: int | None
+    ) -> int:
+        root = str(
+            root_symbol or ""
+        ).upper()
+
+        if root == "MNQ":
+            return self._env_int(
+                "AUTO_MNQ_MAX_POSITION_QUANTITY",
+                2,
+                minimum=1
+            )
+
+        return (
+            default_max
+            if default_max is not None
+            else self._env_int(
+                "AUTO_MAX_POSITION_QUANTITY",
+                3,
+                minimum=1
+            )
+        )
+
+    def _contract_max_position_quantity(
+        self,
+        contract: dict,
+        default_max: int | None
+    ) -> int:
+        return self._root_max_position_quantity(
+            root_symbol=self._contract_root_symbol(
+                contract
+            ),
+            default_max=default_max
+        )
+
+    def _root_position_pnl_from_fields(
+        self,
+        positions: list,
+        root_symbol: str
+    ) -> float | None:
+        values = []
+
+        for position in positions or []:
+            if (
+                self._extract_position_root_symbol(
+                    position
+                )
+                != root_symbol
+            ):
+                continue
+
+            pnl = self._position_field_pnl(
+                position
+            )
+
+            if pnl is not None:
+                values.append(
+                    pnl
+                )
+
+        if not values:
+            return None
+
+        return sum(
+            values
+        )
+
+    def _contract_position_pnl(
+        self,
+        positions: list,
+        contract: dict,
+        current_price: float | None
+    ) -> float | None:
+        values = []
+
+        for position in positions or []:
+            if not self._position_matches_contract(
+                position=position,
+                contract=contract
+            ):
+                continue
+
+            pnl = self._calculate_position_pnl(
+                position=position,
+                contract=contract,
+                current_price=current_price
+            )
+
+            if pnl is not None:
+                values.append(
+                    pnl
+                )
+
+        if not values:
+            return None
+
+        return sum(
+            values
+        )
+
+    def _mnq_allows_additional_position(
+        self,
+        quantity: int,
+        pnl: float | None,
+        max_quantity: int
+    ) -> bool:
+        if quantity <= 0:
+            return True
+
+        if quantity >= max_quantity:
+            return False
+
+        return (
+            pnl is not None
+            and pnl > self._env_float(
+                "AUTO_MNQ_SECOND_POSITION_MIN_PROFIT_USD",
+                0.0
+            )
+        )
+
     def _position_matches_contract(
         self,
         position: dict,
@@ -527,7 +786,9 @@ class BotService:
 
         return candidates or [
             "MNQ",
-            ""
+            "MES",
+            "MYM",
+            "M2K"
         ]
 
     def _auto_contract_limit(
@@ -546,6 +807,43 @@ class BotService:
 
         except Exception:
             return 80
+
+    def _max_trade_quantity(
+        self
+    ) -> int:
+        return self._env_int(
+            "AUTO_MAX_TRADE_QUANTITY",
+            2,
+            minimum=1
+        )
+
+    def _normalize_planned_quantity(
+        self,
+        planned_quantity: int,
+        max_position_quantity: int | None
+    ) -> int:
+        quantity = max(
+            int(
+                planned_quantity
+            ),
+            1
+        )
+
+        quantity = min(
+            quantity,
+            self._max_trade_quantity()
+        )
+
+        if max_position_quantity is not None:
+            quantity = min(
+                quantity,
+                max_position_quantity
+            )
+
+        return max(
+            quantity,
+            1
+        )
 
     def _contract_root_symbol(
         self,
@@ -580,8 +878,25 @@ class BotService:
 
     def _summarize_contract(
         self,
-        contract: dict
+        contract: dict,
+        position_exposure: dict | None = None,
+        max_position_quantity: int | None = None
     ) -> dict:
+        root_symbol = self._contract_root_symbol(
+            contract
+        )
+        root_quantity = (
+            position_exposure
+            or {}
+        ).get(
+            root_symbol,
+            0
+        )
+        root_max_quantity = self._root_max_position_quantity(
+            root_symbol=root_symbol,
+            default_max=max_position_quantity
+        )
+
         return {
             "id": contract.get(
                 "id"
@@ -603,6 +918,12 @@ class BotService:
             ),
             "symbolId": contract.get(
                 "symbolId"
+            ),
+            "rootSymbol": root_symbol,
+            "currentPositionQuantity": root_quantity,
+            "maxPositionQuantity": root_max_quantity,
+            "needsMoreExposure": (
+                root_quantity < root_max_quantity
             )
         }
 
@@ -1206,7 +1527,8 @@ class BotService:
         account_id: int,
         live: bool,
         account_size: int = 50000,
-        phase: str = "evaluation"
+        phase: str = "evaluation",
+        max_position_quantity: int | None = None
     ):
         rotation = await self._refresh_instrument_rotation(
             account_id=account_id
@@ -1231,12 +1553,91 @@ class BotService:
                 )
             )
 
+        positions = []
+
+        try:
+            positions_result = (
+                await self.trading_state_service
+                .position_service
+                .get_open_positions(
+                    account_id=account_id
+                )
+            )
+            positions = positions_result.get(
+                "positions",
+                []
+            )
+
+        except Exception:
+            positions = []
+
+        position_exposure = self._position_exposure_by_root(
+            positions
+        )
+
+        available_contracts = []
+
+        for contract in contracts:
+            root_symbol = self._contract_root_symbol(
+                contract
+            )
+            current_quantity = position_exposure.get(
+                root_symbol,
+                0
+            )
+            root_max_quantity = self._root_max_position_quantity(
+                root_symbol=root_symbol,
+                default_max=max_position_quantity
+            )
+
+            if current_quantity >= root_max_quantity:
+                continue
+
+            if root_symbol == "MNQ":
+                root_pnl = self._root_position_pnl_from_fields(
+                    positions=positions,
+                    root_symbol=root_symbol
+                )
+
+                if not self._mnq_allows_additional_position(
+                    quantity=current_quantity,
+                    pnl=root_pnl,
+                    max_quantity=root_max_quantity
+                ):
+                    continue
+
+            available_contracts.append(
+                contract
+            )
+
+        if not available_contracts:
+            available_contracts = contracts
+
+        available_contracts = sorted(
+            available_contracts,
+            key=lambda contract: (
+                position_exposure.get(
+                    self._contract_root_symbol(
+                        contract
+                    ),
+                    0
+                ),
+                self._contract_root_symbol(
+                    contract
+                )
+                == "MNQ"
+            )
+        )
+
         ai_selection = (
             self.strategy_service
             .select_contract_for_auto_trading(
-                contracts=contracts,
+                contracts=available_contracts,
                 account_size=account_size,
-                phase=phase
+                phase=phase,
+                position_exposure=position_exposure,
+                open_positions=positions,
+                max_position_quantity=max_position_quantity
             )
         )
 
@@ -1246,7 +1647,7 @@ class BotService:
 
         selected_contract = None
 
-        for contract in contracts:
+        for contract in available_contracts:
             if str(
                 contract.get(
                     "id"
@@ -1256,7 +1657,7 @@ class BotService:
                 break
 
         if selected_contract is None:
-            selected_contract = contracts[0]
+            selected_contract = available_contracts[0]
 
         selected_symbol = (
             ai_selection.get(
@@ -1284,10 +1685,22 @@ class BotService:
             "instrument_rotation": rotation,
             "candidate_contracts": [
                 self._summarize_contract(
-                    contract
+                    contract,
+                    position_exposure=position_exposure,
+                    max_position_quantity=max_position_quantity
                 )
                 for contract in contracts
             ],
+            "eligible_contracts": [
+                self._summarize_contract(
+                    contract,
+                    position_exposure=position_exposure,
+                    max_position_quantity=max_position_quantity
+                )
+                for contract in available_contracts
+            ],
+            "position_exposure": position_exposure,
+            "max_position_quantity": max_position_quantity,
             "ai_selection": ai_selection,
             "selection_version": (
                 "DYNAMIC_AI_CONTRACT_SELECTOR_V1"
@@ -1510,9 +1923,9 @@ class BotService:
             minimum=1
         )
 
-        planned_quantity = min(
-            planned_quantity,
-            max_position_quantity
+        planned_quantity = self._normalize_planned_quantity(
+            planned_quantity=planned_quantity,
+            max_position_quantity=max_position_quantity
         )
 
         return {
@@ -1717,6 +2130,14 @@ class BotService:
                 100.0
             )
         )
+        min_hold_hours = self._env_float(
+            "POSITION_MIN_HOLD_HOURS",
+            10.0
+        )
+        max_hold_hours = self._env_float(
+            "POSITION_MAX_HOLD_HOURS",
+            12.0
+        )
 
         matched_positions = [
             position
@@ -1735,7 +2156,9 @@ class BotService:
                 "reason": None,
                 "profit_exit_usd": profit_exit_usd,
                 "rescan_loss_usd": rescan_loss_usd,
-                "hard_loss_exit_usd": hard_loss_exit_usd
+                "hard_loss_exit_usd": hard_loss_exit_usd,
+                "min_hold_hours": min_hold_hours,
+                "max_hold_hours": max_hold_hours
             }
 
         details = []
@@ -1778,9 +2201,55 @@ class BotService:
                     "average_price": position.get(
                         "averagePrice"
                     ),
+                    "age_hours": self._position_age_hours(
+                        position
+                    ),
                     "estimated_pnl": pnl
                 }
             )
+
+        expired_positions = [
+            detail
+            for detail in details
+            if (
+                detail.get(
+                    "age_hours"
+                )
+                is not None
+                and detail.get(
+                    "age_hours"
+                )
+                >= max_hold_hours
+            )
+        ]
+
+        if expired_positions:
+            oldest_age = max(
+                detail.get(
+                    "age_hours"
+                )
+                or 0
+                for detail in expired_positions
+            )
+
+            return {
+                "enabled": True,
+                "status": "TIME_BRACKET_EXIT",
+                "action": "EXIT",
+                "estimated_pnl": total_pnl,
+                "current_price": current_price,
+                "positions": details,
+                "reason": (
+                    f"Client 10-12 hour holding bracket reached: "
+                    f"oldest position age {oldest_age:.2f}h >= "
+                    f"{max_hold_hours:.2f}h."
+                ),
+                "profit_exit_usd": profit_exit_usd,
+                "rescan_loss_usd": rescan_loss_usd,
+                "hard_loss_exit_usd": hard_loss_exit_usd,
+                "min_hold_hours": min_hold_hours,
+                "max_hold_hours": max_hold_hours
+            }
 
         if not pnl_available:
             return {
@@ -2000,6 +2469,13 @@ class BotService:
                 "Contract state is unavailable."
             )
 
+        effective_max_position_quantity = (
+            self._contract_max_position_quantity(
+                contract=contract,
+                default_max=max_position_quantity
+            )
+        )
+
         if not market_gate.get(
             "tradable",
             False
@@ -2107,6 +2583,63 @@ class BotService:
             )
         ).upper()
 
+        if ai_action in {
+            "BUY",
+            "SELL"
+        }:
+            root_symbol = self._contract_root_symbol(
+                contract
+            )
+            current_contract_quantity = sum(
+                self._extract_position_quantity(
+                    position
+                )
+                for position in positions or []
+                if self._position_matches_contract(
+                    position=position,
+                    contract=contract
+                )
+            )
+
+            if (
+                root_symbol == "MNQ"
+                and not self._mnq_allows_additional_position(
+                    quantity=current_contract_quantity,
+                    pnl=self._contract_position_pnl(
+                        positions=positions,
+                        contract=contract,
+                        current_price=market_gate.get(
+                            "quote",
+                            {}
+                        ).get(
+                            "currentPrice"
+                        )
+                    ),
+                    max_quantity=effective_max_position_quantity
+                )
+            ):
+                reason = (
+                    "MNQ is treated as the high-volatility "
+                    "instrument: only one MNQ position is allowed "
+                    "initially, and a second MNQ position is allowed "
+                    "only after the first is profitable."
+                )
+                strategy_result = {
+                    **strategy_result,
+                    "status": "BLOCK",
+                    "action": "WAIT",
+                    "reason": reason,
+                    "ai_analysis": {
+                        **strategy_result.get(
+                            "ai_analysis",
+                            {}
+                        ),
+                        "setup_valid": False,
+                        "reason": reason
+                    }
+                }
+                ai_action = "WAIT"
+
         rule_result = None
         risk_result = None
 
@@ -2177,7 +2710,7 @@ class BotService:
             daily_pnl=daily_pnl,
             daily_loss_limit=daily_loss_limit,
             current_mll=current_mll,
-            max_position_quantity=max_position_quantity,
+            max_position_quantity=effective_max_position_quantity,
             max_quote_age_seconds=max_quote_age_seconds
         )
 
@@ -2236,6 +2769,18 @@ class BotService:
         symbol_selection = None
         resolved_contract = None
 
+        if max_position_quantity is None:
+            max_position_quantity = self._env_int(
+                "AUTO_MAX_POSITION_QUANTITY",
+                3,
+                minimum=1
+            )
+
+        planned_quantity = self._normalize_planned_quantity(
+            planned_quantity=planned_quantity,
+            max_position_quantity=max_position_quantity
+        )
+
         if self._is_auto_symbol(
             symbol
         ):
@@ -2243,7 +2788,8 @@ class BotService:
                 account_id=account_id,
                 live=live,
                 account_size=account_size,
-                phase=phase
+                phase=phase,
+                max_position_quantity=max_position_quantity
             )
 
             symbol = symbol_selection[

@@ -144,7 +144,10 @@ class StrategyService:
         self,
         contracts: List[dict],
         account_size: int = 50000,
-        phase: str = "evaluation"
+        phase: str = "evaluation",
+        position_exposure: dict | None = None,
+        open_positions: List[dict] | None = None,
+        max_position_quantity: int | None = None
     ) -> Dict[str, Any]:
         if not contracts:
             raise ValueError(
@@ -154,6 +157,10 @@ class StrategyService:
         summarized_contracts = []
 
         for contract in contracts:
+            root_symbol = str(
+                contract.get("symbolId", "")
+            ).split(".")[-1].upper()
+
             summarized_contracts.append(
                 {
                     "id": contract.get("id"),
@@ -162,7 +169,15 @@ class StrategyService:
                     "tickSize": contract.get("tickSize"),
                     "tickValue": contract.get("tickValue"),
                     "activeContract": contract.get("activeContract"),
-                    "symbolId": contract.get("symbolId")
+                    "symbolId": contract.get("symbolId"),
+                    "rootSymbol": root_symbol,
+                    "currentPositionQuantity": (
+                        position_exposure
+                        or {}
+                    ).get(
+                        root_symbol,
+                        0
+                    )
                 }
             )
 
@@ -176,12 +191,20 @@ Selection priorities:
 
 1. Only choose a contract from the provided list.
 2. Prefer active contracts.
-3. Prefer MNQ / Micro E-mini Nasdaq-100 when it is available and
-   active because the client requested it for better profit potential.
-4. Prefer liquid, common futures instruments suitable for evaluation.
-5. Prefer smaller risk instruments when two choices are similar.
-6. Do not invent symbols or contract IDs.
-7. If the metadata is not enough to identify an advantage, choose the
+3. Use the client's preferred mix-and-match universe when available:
+   MES, MNQ, MYM, and M2K. MNQ can be preferred for profit potential,
+   but do not always concentrate in MNQ when another supplied active
+   micro contract gives safer diversification.
+4. Prefer spreading exposure across the supplied active instruments
+   instead of repeatedly selecting the same root symbol.
+5. Respect the maximum position quantity per instrument. Do not select
+   an instrument that is already at or above that limit.
+6. Prefer liquid, common futures instruments suitable for evaluation.
+7. Prefer one/two-unit style micro trades; contract choice should not
+   require oversized concentration.
+8. Prefer smaller risk instruments when two choices are similar.
+9. Do not invent symbols or contract IDs.
+10. If the metadata is not enough to identify an advantage, choose the
    safest commonly traded contract from the available list.
 
 Return JSON only with this exact shape:
@@ -197,7 +220,23 @@ Return JSON only with this exact shape:
         context = {
             "account_size": account_size,
             "phase": phase,
-            "contracts": summarized_contracts
+            "contracts": summarized_contracts,
+            "position_exposure": position_exposure or {},
+            "open_positions": open_positions or [],
+            "max_position_quantity": max_position_quantity,
+            "client_instrument_guidance": {
+                "preferred_roots": [
+                    "MES",
+                    "MNQ",
+                    "MYM",
+                    "M2K"
+                ],
+                "mnq_note": (
+                    "MNQ can bring larger profits or losses; "
+                    "prefer it only when suitable, and use other "
+                    "micro indices for safer mix-and-match exposure."
+                )
+            }
         }
 
         response = self.client.responses.create(
@@ -799,6 +838,12 @@ Important rules:
 8. The output will be independently checked by deterministic
    rule, risk, and safety engines.
 9. Never claim guaranteed profit or guaranteed evaluation pass.
+10. The client wants a micro-index mix across MES, MNQ, MYM, and
+   M2K instead of concentrating only in one instrument.
+11. Treat MNQ as the "naughty" high-volatility instrument: do not
+   add MNQ exposure unless the existing MNQ position is profitable,
+   and never assume MNQ can use the same max exposure as the other
+   instruments.
 
 Trade-selection guidance:
 
