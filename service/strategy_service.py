@@ -91,6 +91,26 @@ class StrategyService:
             )
         )
 
+    def _min_trade_confidence(
+        self
+    ) -> float:
+        try:
+            return max(
+                0.0,
+                min(
+                    float(
+                        os.getenv(
+                            "MIN_TRADE_CONFIDENCE",
+                            "0.60"
+                        )
+                    ),
+                    1.0
+                )
+            )
+
+        except Exception:
+            return 0.60
+
     def _normalize_choice(
         self,
         value,
@@ -491,6 +511,7 @@ Return JSON only with this exact shape:
         )
 
         validation_errors = []
+        min_trade_confidence = self._min_trade_confidence()
 
         if action == "WAIT":
             setup_valid = False
@@ -516,6 +537,14 @@ Return JSON only with this exact shape:
             if confidence <= 0:
                 validation_errors.append(
                     "BUY/SELL requires positive confidence."
+                )
+
+            if confidence < min_trade_confidence:
+                validation_errors.append(
+                    (
+                        "BUY/SELL requires confidence >= "
+                        f"{min_trade_confidence:.2f}."
+                    )
                 )
 
             if data_quality == "INSUFFICIENT":
@@ -796,6 +825,8 @@ Return JSON only with this exact shape:
         # AI Instructions
         # =========================
 
+        min_trade_confidence = self._min_trade_confidence()
+
         instructions = """
 You are the strategy-analysis component of an autonomous
 futures trading system.
@@ -867,9 +898,9 @@ Trade-selection guidance:
 7. Reasonable SELL templates include confirmed breakdown continuation,
    pullback failing below resistance, rejection of prior support, or
    bearish reversal from a session high.
-8. For BUY/SELL, use confidence that reflects setup quality. Prefer
-   BUY/SELL when confidence is about 0.55 or higher and the stop-loss
-   and take-profit are logically placed.
+8. For BUY/SELL, use confidence that reflects setup quality. Return
+   BUY/SELL only when confidence is {MIN_TRADE_CONFIDENCE} or higher
+   and the stop-loss and take-profit are logically placed.
 9. Return WAIT when the market is stale, conflicting, range-bound
    without edge, or lacks a valid stop-loss/take-profit plan.
 
@@ -887,6 +918,10 @@ Return JSON only with this exact shape:
   "data_quality": "GOOD | LIMITED | INSUFFICIENT"
 }
 """
+        instructions = instructions.replace(
+            "{MIN_TRADE_CONFIDENCE}",
+            f"{min_trade_confidence:.2f}"
+        )
 
         # =========================
         # OpenAI

@@ -147,6 +147,20 @@ class BotService:
         except Exception:
             return default
 
+    def _min_trade_confidence(
+        self
+    ) -> float:
+        return max(
+            0.0,
+            min(
+                self._env_float(
+                    "MIN_TRADE_CONFIDENCE",
+                    0.60
+                ),
+                1.0
+            )
+        )
+
     def _extract_position_contract_id(
         self,
         position: dict
@@ -370,6 +384,34 @@ class BotService:
                 return age_seconds / 3600
 
         return None
+
+    def _position_sort_key(
+        self,
+        position: dict
+    ):
+        age = self._position_age_hours(
+            position
+        )
+
+        return (
+            -1
+            if age is None
+            else -age
+        )
+
+    def _supported_auto_roots(
+        self
+    ) -> set[str]:
+        return {
+            item.strip().upper()
+            for item in (
+                os.getenv(
+                    "AUTO_TRADE_CONTRACT_SEARCH_TEXTS",
+                    "MNQ,MES,MYM,M2K"
+                )
+            ).split(",")
+            if item.strip()
+        }
 
     def _root_max_position_quantity(
         self,
@@ -1710,6 +1752,81 @@ class BotService:
             )
         }
 
+    async def _resolve_open_position_contract(
+        self,
+        account_id: int,
+        live: bool
+    ) -> dict | None:
+        try:
+            positions_result = (
+                await self.trading_state_service
+                .position_service
+                .get_open_positions(
+                    account_id=account_id
+                )
+            )
+
+        except Exception:
+            return None
+
+        positions = positions_result.get(
+            "positions",
+            []
+        )
+        supported_roots = self._supported_auto_roots()
+
+        managed_positions = [
+            position
+            for position in positions or []
+            if (
+                self._extract_position_root_symbol(
+                    position
+                )
+                in supported_roots
+            )
+        ]
+
+        if not managed_positions:
+            return None
+
+        managed_positions = sorted(
+            managed_positions,
+            key=self._position_sort_key
+        )
+        position = managed_positions[0]
+        root_symbol = self._extract_position_root_symbol(
+            position
+        )
+
+        if not root_symbol:
+            return None
+
+        contract = await self._resolve_active_contract(
+            symbol=root_symbol,
+            live=live
+        )
+
+        return {
+            "requested_symbol": "AUTO",
+            "selected_symbol": contract.get(
+                "name"
+            )
+            or root_symbol,
+            "contract": contract,
+            "open_position_first": True,
+            "managed_position": position,
+            "position_exposure": self._position_exposure_by_root(
+                positions
+            ),
+            "selection_version": (
+                "OPEN_POSITION_FIRST_SELECTOR_V1"
+            ),
+            "reason": (
+                "Existing open position is managed before "
+                "selecting a new instrument."
+            )
+        }
+
     async def _resolve_active_contract(
         self,
         symbol: str,
@@ -2587,6 +2704,45 @@ class BotService:
             "BUY",
             "SELL"
         }:
+            min_confidence = self._min_trade_confidence()
+            confidence = self._to_float(
+                strategy_result.get(
+                    "ai_analysis",
+                    {}
+                ).get(
+                    "confidence"
+                )
+            )
+
+            if (
+                confidence is None
+                or confidence < min_confidence
+            ):
+                reason = (
+                    "Trade confidence is below required threshold: "
+                    f"{confidence if confidence is not None else 'N/A'} "
+                    f"< {min_confidence:.2f}."
+                )
+                strategy_result = {
+                    **strategy_result,
+                    "status": "BLOCK",
+                    "action": "WAIT",
+                    "reason": reason,
+                    "ai_analysis": {
+                        **strategy_result.get(
+                            "ai_analysis",
+                            {}
+                        ),
+                        "setup_valid": False,
+                        "reason": reason
+                    }
+                }
+                ai_action = "WAIT"
+
+        if ai_action in {
+            "BUY",
+            "SELL"
+        }:
             root_symbol = self._contract_root_symbol(
                 contract
             )
@@ -2784,13 +2940,21 @@ class BotService:
         if self._is_auto_symbol(
             symbol
         ):
-            symbol_selection = await self._resolve_auto_symbol(
-                account_id=account_id,
-                live=live,
-                account_size=account_size,
-                phase=phase,
-                max_position_quantity=max_position_quantity
+            symbol_selection = (
+                await self._resolve_open_position_contract(
+                    account_id=account_id,
+                    live=live
+                )
             )
+
+            if symbol_selection is None:
+                symbol_selection = await self._resolve_auto_symbol(
+                    account_id=account_id,
+                    live=live,
+                    account_size=account_size,
+                    phase=phase,
+                    max_position_quantity=max_position_quantity
+                )
 
             symbol = symbol_selection[
                 "selected_symbol"

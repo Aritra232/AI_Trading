@@ -63,6 +63,32 @@ class ExecutionService:
             "ORDER"
         }
 
+    def _require_protective_brackets(
+        self
+    ) -> bool:
+        return (
+            os.getenv(
+                "REQUIRE_PROTECTIVE_BRACKETS",
+                "true"
+            )
+            .strip()
+            .lower()
+            == "true"
+        )
+
+    def _has_protective_brackets(
+        self,
+        payload: dict
+    ) -> bool:
+        return bool(
+            payload.get(
+                "stopLossBracket"
+            )
+            and payload.get(
+                "takeProfitBracket"
+            )
+        )
+
     def _position_bracket_conflict(
         self,
         response: dict
@@ -587,6 +613,24 @@ class ExecutionService:
                 "order_payload": payload
             }
 
+        if (
+            self._require_protective_brackets()
+            and not self._has_protective_brackets(
+                payload
+            )
+        ):
+            return {
+                "success": True,
+                "execution_status": "BLOCKED",
+                "submitted": False,
+                "reason": (
+                    "Protective stop-loss and take-profit brackets "
+                    "are required for new entries."
+                ),
+                "order_payload": payload,
+                "order_bracket_mode": self._order_bracket_mode()
+            }
+
         return {
             "success": True,
             "submitted": False,
@@ -885,6 +929,25 @@ class ExecutionService:
                 order_response
             )
         ):
+            if self._require_protective_brackets():
+                return {
+                    **prepared,
+                    "execution_status": "REJECTED",
+                    "dry_run": False,
+                    "submitted": False,
+                    "message": (
+                        "ProjectX rejected order-level brackets; "
+                        "unsafe retry without protective brackets "
+                        "was blocked."
+                    ),
+                    "order_response": order_response,
+                    "original_order_response": order_response,
+                    "bracket_retry_used": False,
+                    "execution_version": (
+                        "EXECUTION_LIVE_V1"
+                    )
+                }
+
             original_order_response = order_response
             bracket_retry_used = True
             order_payload = self._remove_order_brackets(
