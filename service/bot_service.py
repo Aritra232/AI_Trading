@@ -147,6 +147,25 @@ class BotService:
         except Exception:
             return default
 
+    def _env_bool(
+        self,
+        name: str,
+        default: bool
+    ) -> bool:
+        raw = os.getenv(
+            name
+        )
+
+        if raw is None:
+            return default
+
+        return raw.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on"
+        }
+
     def _min_trade_confidence(
         self
     ) -> float:
@@ -684,10 +703,69 @@ class BotService:
 
         return None, "UNAVAILABLE"
 
+    def _bar_close_price(
+        self,
+        bar: dict | None
+    ) -> float | None:
+        if not isinstance(
+            bar,
+            dict
+        ):
+            return None
+
+        return self._to_float(
+            bar.get(
+                "c"
+            )
+            or bar.get(
+                "close"
+            )
+        )
+
+    def _price_scale_tolerance(
+        self
+    ) -> float:
+        return max(
+            0.01,
+            self._env_float(
+                "AUTO_CONTRACT_PRICE_SCALE_TOLERANCE",
+                0.25
+            )
+        )
+
+    def _price_scale_block(
+        self,
+        current_price: float | None,
+        latest_bar_close: float | None,
+        symbol: str
+    ) -> str | None:
+        if (
+            current_price is None
+            or latest_bar_close is None
+            or latest_bar_close <= 0
+        ):
+            return None
+
+        relative_difference = abs(
+            current_price - latest_bar_close
+        ) / latest_bar_close
+
+        tolerance = self._price_scale_tolerance()
+
+        if relative_difference <= tolerance:
+            return None
+
+        return (
+            f"{symbol} quote/history price-scale mismatch. "
+            f"Quote={current_price}, latest_bar_close="
+            f"{latest_bar_close}, tolerance={tolerance:.2f}."
+        )
+
     def _evaluate_market_gate(
         self,
         market: dict,
-        max_quote_age_seconds: int
+        max_quote_age_seconds: int,
+        expected_contract_id: str | None = None
     ):
         quote = market.get(
             "quote"
@@ -699,6 +777,18 @@ class BotService:
             quote_data = quote.get(
                 "data",
                 quote
+            )
+
+        quote_contract_id = None
+
+        if isinstance(
+            quote,
+            dict
+        ):
+            quote_contract_id = quote.get(
+                "contract_id"
+            ) or quote.get(
+                "contractId"
             )
 
         quote_timestamp = (
@@ -725,6 +815,23 @@ class BotService:
         if not quote:
             blocks.append(
                 "Realtime quote is unavailable."
+            )
+
+        elif (
+            expected_contract_id
+            and quote_contract_id
+            and str(
+                quote_contract_id
+            ) != str(
+                expected_contract_id
+            )
+        ):
+            blocks.append(
+                (
+                    "Realtime quote contract mismatch. "
+                    f"Expected={expected_contract_id}, "
+                    f"received={quote_contract_id}."
+                )
             )
 
         elif quote_age_seconds is None:
@@ -759,6 +866,8 @@ class BotService:
             "blocks": blocks,
             "quote": {
                 "available": quote is not None,
+                "contract_id": quote_contract_id,
+                "expected_contract_id": expected_contract_id,
                 "lastUpdated": quote_timestamp,
                 "age_seconds": quote_age_seconds,
                 "max_age_seconds": max_quote_age_seconds,
@@ -1552,6 +1661,201 @@ class BotService:
             )
         }
 
+    async def _evaluate_auto_contract_health(
+        self,
+        contract: dict,
+        live: bool,
+        max_quote_age_seconds: int,
+        lookback_hours: int,
+        realtime_warmup_seconds: int
+    ) -> dict:
+        contract_id = contract.get(
+            "id"
+        )
+        symbol = contract.get(
+            "name"
+        ) or self._contract_root_symbol(
+            contract
+        )
+        blocks = []
+        warnings = []
+        latest_bar = None
+        latest_bar_close = None
+
+        if not contract_id:
+            return {
+                "symbol": symbol,
+                "contract_id": contract_id,
+                "tradable": False,
+                "blocks": [
+                    "Contract id is unavailable."
+                ],
+                "warnings": warnings
+            }
+
+        try:
+            await self.realtime_service.start_market_hub(
+                contract_id=contract_id
+            )
+
+            if realtime_warmup_seconds > 0:
+                await asyncio.sleep(
+                    realtime_warmup_seconds
+                )
+
+            latest = self.realtime_service.get_latest_data().get(
+                "data",
+                {}
+            )
+            quote = latest.get(
+                "quote"
+            )
+            market_gate = self._evaluate_market_gate(
+                market={
+                    "quote": quote
+                },
+                max_quote_age_seconds=max_quote_age_seconds,
+                expected_contract_id=contract_id
+            )
+
+            blocks.extend(
+                market_gate.get(
+                    "blocks",
+                    []
+                )
+            )
+
+            try:
+                history = await (
+                    self.trading_state_service
+                    .history_service
+                    .get_bars(
+                        contract_id=contract_id,
+                        start_time=self._utc_lookback_iso(
+                            lookback_hours
+                        ),
+                        end_time=self._utc_now_iso(),
+                        unit=2,
+                        unit_number=5,
+                        limit=1,
+                        live=live
+                    )
+                )
+                latest_bar = history.get(
+                    "latest_bar"
+                )
+                latest_bar_close = self._bar_close_price(
+                    latest_bar
+                )
+
+            except Exception as exc:
+                warnings.append(
+                    (
+                        "Historical bar health check failed: "
+                        f"{exc}"
+                    )
+                )
+
+            scale_block = self._price_scale_block(
+                current_price=market_gate.get(
+                    "quote",
+                    {}
+                ).get(
+                    "currentPrice"
+                ),
+                latest_bar_close=latest_bar_close,
+                symbol=str(
+                    symbol
+                )
+            )
+
+            if scale_block:
+                blocks.append(
+                    scale_block
+                )
+
+            return {
+                "symbol": symbol,
+                "contract_id": contract_id,
+                "tradable": len(
+                    blocks
+                ) == 0,
+                "blocks": blocks,
+                "warnings": warnings,
+                "quote": market_gate.get(
+                    "quote"
+                ),
+                "latest_bar": latest_bar,
+                "latest_bar_close": latest_bar_close,
+                "health_version": (
+                    "AUTO_CONTRACT_HEALTH_V1"
+                )
+            }
+
+        except Exception as exc:
+            return {
+                "symbol": symbol,
+                "contract_id": contract_id,
+                "tradable": False,
+                "blocks": [
+                    (
+                        "Contract market-health check failed: "
+                        f"{exc}"
+                    )
+                ],
+                "warnings": warnings,
+                "health_version": (
+                    "AUTO_CONTRACT_HEALTH_V1"
+                )
+            }
+
+    async def _filter_auto_contracts_by_market_health(
+        self,
+        contracts: list,
+        live: bool,
+        max_quote_age_seconds: int,
+        lookback_hours: int
+    ) -> tuple[list, list]:
+        if not self._env_bool(
+            "AUTO_CONTRACT_HEALTH_CHECK_ENABLED",
+            True
+        ):
+            return contracts, []
+
+        warmup_seconds = self._env_int(
+            "AUTO_CONTRACT_HEALTH_WARMUP_SECONDS",
+            2,
+            minimum=0
+        )
+
+        health_results = []
+        healthy_contracts = []
+
+        for contract in contracts:
+            health = await self._evaluate_auto_contract_health(
+                contract=contract,
+                live=live,
+                max_quote_age_seconds=max_quote_age_seconds,
+                lookback_hours=lookback_hours,
+                realtime_warmup_seconds=warmup_seconds
+            )
+            health_results.append(
+                health
+            )
+
+            if health.get(
+                "tradable",
+                False
+            ):
+                healthy_contracts.append(
+                    contract
+                )
+
+        if healthy_contracts:
+            return healthy_contracts, health_results
+
+        return contracts, health_results
+
     def _is_auto_symbol(
         self,
         symbol: str
@@ -1570,7 +1874,9 @@ class BotService:
         live: bool,
         account_size: int = 50000,
         phase: str = "evaluation",
-        max_position_quantity: int | None = None
+        max_position_quantity: int | None = None,
+        max_quote_age_seconds: int = 30,
+        lookback_hours: int = 72
     ):
         rotation = await self._refresh_instrument_rotation(
             account_id=account_id
@@ -1671,6 +1977,18 @@ class BotService:
             )
         )
 
+        market_health = []
+
+        (
+            available_contracts,
+            market_health
+        ) = await self._filter_auto_contracts_by_market_health(
+            contracts=available_contracts,
+            live=live,
+            max_quote_age_seconds=max_quote_age_seconds,
+            lookback_hours=lookback_hours
+        )
+
         ai_selection = (
             self.strategy_service
             .select_contract_for_auto_trading(
@@ -1741,6 +2059,7 @@ class BotService:
                 )
                 for contract in available_contracts
             ],
+            "market_health": market_health,
             "position_exposure": position_exposure,
             "max_position_quantity": max_position_quantity,
             "ai_selection": ai_selection,
@@ -2573,7 +2892,8 @@ class BotService:
 
         market_gate = self._evaluate_market_gate(
             market=market,
-            max_quote_age_seconds=max_quote_age_seconds
+            max_quote_age_seconds=max_quote_age_seconds,
+            expected_contract_id=contract_id
         )
 
         if not account:
@@ -2953,7 +3273,9 @@ class BotService:
                     live=live,
                     account_size=account_size,
                     phase=phase,
-                    max_position_quantity=max_position_quantity
+                    max_position_quantity=max_position_quantity,
+                    max_quote_age_seconds=max_quote_age_seconds,
+                    lookback_hours=lookback_hours
                 )
 
             symbol = symbol_selection[

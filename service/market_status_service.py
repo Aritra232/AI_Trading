@@ -141,6 +141,52 @@ class MarketStatusService:
 
         return None, "UNAVAILABLE"
 
+    def _bar_close_price(
+        self,
+        bar: dict | None
+    ):
+        if not isinstance(
+            bar,
+            dict
+        ):
+            return None
+
+        return self._to_float(
+            bar.get(
+                "c"
+            )
+            or bar.get(
+                "close"
+            )
+        )
+
+    def _price_scale_block(
+        self,
+        current_price,
+        latest_bar_close,
+        symbol: str
+    ):
+        if (
+            current_price is None
+            or latest_bar_close is None
+            or latest_bar_close <= 0
+        ):
+            return None
+
+        tolerance = 0.25
+        relative_difference = abs(
+            current_price - latest_bar_close
+        ) / latest_bar_close
+
+        if relative_difference <= tolerance:
+            return None
+
+        return (
+            f"{symbol} quote/history price-scale mismatch. "
+            f"Quote={current_price}, latest_bar_close="
+            f"{latest_bar_close}, tolerance={tolerance:.2f}."
+        )
+
     async def _get_account(
         self,
         account_id: int
@@ -266,11 +312,17 @@ class MarketStatusService:
         )
 
         quote_data = {}
+        quote_contract_id = None
 
         if quote:
             quote_data = quote.get(
                 "data",
                 quote
+            )
+            quote_contract_id = quote.get(
+                "contract_id"
+            ) or quote.get(
+                "contractId"
             )
 
         quote_timestamp = (
@@ -317,6 +369,10 @@ class MarketStatusService:
                 )
             )
 
+        latest_bar_close = self._bar_close_price(
+            latest_bar
+        )
+
         account_can_trade = bool(
             account.get(
                 "canTrade",
@@ -349,6 +405,22 @@ class MarketStatusService:
                 "Realtime quote is unavailable."
             )
 
+        elif (
+            quote_contract_id
+            and str(
+                quote_contract_id
+            ) != str(
+                contract_id
+            )
+        ):
+            blocks.append(
+                (
+                    "Realtime quote contract mismatch. "
+                    f"Expected={contract_id}, "
+                    f"received={quote_contract_id}."
+                )
+            )
+
         elif quote_age_seconds is None:
             blocks.append(
                 "Realtime quote timestamp cannot be validated."
@@ -366,6 +438,17 @@ class MarketStatusService:
         if quote and current_price is None:
             blocks.append(
                 "Current market price is unavailable."
+            )
+
+        scale_block = self._price_scale_block(
+            current_price=current_price,
+            latest_bar_close=latest_bar_close,
+            symbol=symbol
+        )
+
+        if scale_block:
+            blocks.append(
+                scale_block
             )
 
         if not latest_bar:
@@ -419,6 +502,8 @@ class MarketStatusService:
             },
             "quote": {
                 "available": quote is not None,
+                "contract_id": quote_contract_id,
+                "expected_contract_id": contract_id,
                 "lastUpdated": quote_timestamp,
                 "age_seconds": quote_age_seconds,
                 "max_age_seconds": max_quote_age_seconds,
@@ -445,6 +530,7 @@ class MarketStatusService:
                 "latest_bar_age_seconds": (
                     latest_bar_age_seconds
                 ),
+                "latest_bar_close": latest_bar_close,
                 "bar_count": history.get(
                     "bar_count"
                 )

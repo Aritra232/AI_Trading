@@ -1599,7 +1599,9 @@ async def get_live_readiness(
                     account_id=account_id,
                     live=live,
                     account_size=account_size,
-                    phase=phase
+                    phase=phase,
+                    max_quote_age_seconds=max_quote_age_seconds,
+                    lookback_hours=lookback_hours
                 )
             )
 

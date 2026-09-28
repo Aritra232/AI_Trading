@@ -139,6 +139,14 @@ class RealtimeService:
             merged
         )
 
+    def _clear_market_latest(
+        self
+    ):
+        with self._lock:
+            self.latest["quote"] = None
+            self.latest["market_trade"] = None
+            self.latest["depth"] = None
+
     def _normalize_single_event(self, args):
         if isinstance(args, list) and len(args) == 1:
             return args[0]
@@ -477,6 +485,9 @@ class RealtimeService:
                 }
 
             token = await self.topstep_service.get_token()
+            switching_contract = (
+                self.market_contract_id != contract_id
+            )
 
             if self.market_connection is not None:
                 try:
@@ -488,6 +499,9 @@ class RealtimeService:
 
             self.market_contract_id = contract_id
             self._last_market_start_attempt = time.monotonic()
+
+            if switching_contract:
+                self._clear_market_latest()
 
             self.market_connection = (
                 self._build_market_connection(token)
