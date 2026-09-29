@@ -18,6 +18,7 @@ class RealtimeService:
 
         self.user_account_id: Optional[int] = None
         self.market_contract_id: Optional[str] = None
+        self.market_contract_ids: set[str] = set()
         self.user_connected = False
         self.market_connected = False
         self._last_user_start_attempt = 0.0
@@ -32,7 +33,10 @@ class RealtimeService:
             "trade": None,
             "quote": None,
             "market_trade": None,
-            "depth": None
+            "depth": None,
+            "quotes_by_contract": {},
+            "market_trades_by_contract": {},
+            "depth_by_contract": {}
         }
 
         self._lock = threading.Lock()
@@ -132,11 +136,113 @@ class RealtimeService:
                         "data": merged_data
                     }
 
+            contract_id = (
+                merged.get(
+                    "contract_id"
+                )
+                if isinstance(
+                    merged,
+                    dict
+                )
+                else None
+            )
+
+            if contract_id:
+                quotes_by_contract = dict(
+                    self.latest.get(
+                        "quotes_by_contract",
+                        {}
+                    )
+                    or {}
+                )
+                quotes_by_contract[str(
+                    contract_id
+                )] = merged
+                self.latest["quotes_by_contract"] = (
+                    quotes_by_contract
+                )
+
             self.latest["quote"] = merged
 
         self._debug_print(
             "quote",
             merged
+        )
+
+    def _set_latest_market_trade(
+        self,
+        value: Any
+    ):
+        with self._lock:
+            contract_id = (
+                value.get(
+                    "contract_id"
+                )
+                if isinstance(
+                    value,
+                    dict
+                )
+                else None
+            )
+
+            if contract_id:
+                trades_by_contract = dict(
+                    self.latest.get(
+                        "market_trades_by_contract",
+                        {}
+                    )
+                    or {}
+                )
+                trades_by_contract[str(
+                    contract_id
+                )] = value
+                self.latest[
+                    "market_trades_by_contract"
+                ] = trades_by_contract
+
+            self.latest["market_trade"] = value
+
+        self._debug_print(
+            "market_trade",
+            value
+        )
+
+    def _set_latest_depth(
+        self,
+        value: Any
+    ):
+        with self._lock:
+            contract_id = (
+                value.get(
+                    "contract_id"
+                )
+                if isinstance(
+                    value,
+                    dict
+                )
+                else None
+            )
+
+            if contract_id:
+                depth_by_contract = dict(
+                    self.latest.get(
+                        "depth_by_contract",
+                        {}
+                    )
+                    or {}
+                )
+                depth_by_contract[str(
+                    contract_id
+                )] = value
+                self.latest["depth_by_contract"] = (
+                    depth_by_contract
+                )
+
+            self.latest["depth"] = value
+
+        self._debug_print(
+            "depth",
+            value
         )
 
     def _clear_market_latest(
@@ -405,8 +511,7 @@ class RealtimeService:
         # Market trade
         connection.on(
             "GatewayTrade",
-            lambda args: self._set_latest(
-                "market_trade",
+            lambda args: self._set_latest_market_trade(
                 self._normalize_market_event(args)
             )
         )
@@ -414,8 +519,7 @@ class RealtimeService:
         # DOM / Market Depth
         connection.on(
             "GatewayDepth",
-            lambda args: self._set_latest(
-                "depth",
+            lambda args: self._set_latest_depth(
                 self._normalize_market_event(args)
             )
         )
@@ -455,21 +559,63 @@ class RealtimeService:
         async with self._market_start_lock:
             if (
                 self.market_connection is not None
-                and self.market_contract_id == contract_id
                 and self.market_connected
             ):
-                return {
-                    "success": True,
-                    "message": (
-                        "Market realtime connection already active"
-                    ),
-                    "contract_id": contract_id,
-                    "reused": True
-                }
+                if str(
+                    contract_id
+                ) not in self.market_contract_ids:
+                    try:
+                        self.market_connection.send(
+                            "SubscribeContractQuotes",
+                            [contract_id]
+                        )
+
+                        self.market_connection.send(
+                            "SubscribeContractTrades",
+                            [contract_id]
+                        )
+
+                        self.market_connection.send(
+                            "SubscribeContractMarketDepth",
+                            [contract_id]
+                        )
+
+                        self.market_contract_ids.add(
+                            str(
+                                contract_id
+                            )
+                        )
+                        self.market_contract_id = contract_id
+
+                    except Exception:
+                        self.market_connected = False
+
+                    else:
+                        return {
+                            "success": True,
+                            "message": (
+                                "Market realtime contract subscribed"
+                            ),
+                            "contract_id": contract_id,
+                            "reused": True
+                        }
+
+                else:
+                    self.market_contract_id = contract_id
+
+                    return {
+                        "success": True,
+                        "message": (
+                            "Market realtime connection already active"
+                        ),
+                        "contract_id": contract_id,
+                        "reused": True
+                    }
 
             if (
                 self.market_connection is not None
                 and self.market_contract_id == contract_id
+                and self.market_connected
                 and self._within_reconnect_cooldown(
                     self._last_market_start_attempt
                 )
@@ -485,9 +631,6 @@ class RealtimeService:
                 }
 
             token = await self.topstep_service.get_token()
-            switching_contract = (
-                self.market_contract_id != contract_id
-            )
 
             if self.market_connection is not None:
                 try:
@@ -498,10 +641,12 @@ class RealtimeService:
                 self.market_connected = False
 
             self.market_contract_id = contract_id
+            self.market_contract_ids = {
+                str(
+                    contract_id
+                )
+            }
             self._last_market_start_attempt = time.monotonic()
-
-            if switching_contract:
-                self._clear_market_latest()
 
             self.market_connection = (
                 self._build_market_connection(token)
@@ -563,7 +708,62 @@ class RealtimeService:
                 "success": True,
                 "user_account_id": self.user_account_id,
                 "market_contract_id": self.market_contract_id,
+                "market_contract_ids": list(
+                    self.market_contract_ids
+                ),
                 "data": dict(self.latest)
+            }
+
+    def get_latest_market_data(
+        self,
+        contract_id: str | None = None
+    ):
+        with self._lock:
+            if not contract_id:
+                return {
+                    "quote": self.latest.get(
+                        "quote"
+                    ),
+                    "market_trade": self.latest.get(
+                        "market_trade"
+                    ),
+                    "depth": self.latest.get(
+                        "depth"
+                    )
+                }
+
+            contract_key = str(
+                contract_id
+            )
+
+            return {
+                "quote": (
+                    self.latest.get(
+                        "quotes_by_contract",
+                        {}
+                    )
+                    or {}
+                ).get(
+                    contract_key
+                ),
+                "market_trade": (
+                    self.latest.get(
+                        "market_trades_by_contract",
+                        {}
+                    )
+                    or {}
+                ).get(
+                    contract_key
+                ),
+                "depth": (
+                    self.latest.get(
+                        "depth_by_contract",
+                        {}
+                    )
+                    or {}
+                ).get(
+                    contract_key
+                )
             }
 
     # =========================
@@ -590,6 +790,7 @@ class RealtimeService:
             self.market_connection = None
             self.market_connected = False
             self.market_contract_id = None
+            self.market_contract_ids = set()
 
         return {
             "success": True,

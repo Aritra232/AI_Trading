@@ -1703,9 +1703,8 @@ class BotService:
                     realtime_warmup_seconds
                 )
 
-            latest = self.realtime_service.get_latest_data().get(
-                "data",
-                {}
+            latest = self.realtime_service.get_latest_market_data(
+                contract_id=contract_id
             )
             quote = latest.get(
                 "quote"

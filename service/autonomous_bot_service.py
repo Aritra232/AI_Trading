@@ -179,97 +179,129 @@ class AutonomousBotService:
 
                     continue
 
-                await self.bot_service.run_once(
-                    account_id=int(
-                        config["account_id"]
-                    ),
-                    symbol=str(
+                run_symbols = [
+                    str(
                         config["symbol"]
-                    ),
-                    dry_run=bool(
-                        config["dry_run"]
-                    ),
-                    account_size=int(
-                        config["account_size"]
-                    ),
-                    planned_quantity=int(
-                        config["planned_quantity"]
-                    ),
-                    current_mll=config.get(
-                        "current_mll"
-                    ),
-                    best_day_profit=config.get(
-                        "best_day_profit"
-                    ),
-                    max_risk_per_trade=config.get(
-                        "max_risk_per_trade"
-                    ),
-                    daily_pnl=config.get(
-                        "daily_pnl"
-                    ),
-                    evaluation_trading_days=config.get(
-                        "evaluation_trading_days"
-                    ),
-                    daily_loss_limit=config.get(
-                        "daily_loss_limit"
-                    ),
-                    max_position_quantity=config.get(
-                        "max_position_quantity"
-                    ),
-                    kill_switch=False,
-                    max_quote_age_seconds=int(
-                        config["max_quote_age_seconds"]
-                    ),
-                    order_type=str(
-                        config["order_type"]
-                    ),
-                    lookback_hours=int(
-                        config["lookback_hours"]
-                    ),
-                    auto_start_realtime=bool(
-                        config["auto_start_realtime"]
-                    ),
-                    realtime_warmup_seconds=int(
-                        config["realtime_warmup_seconds"]
-                    ),
-                    live=bool(
-                        config["live"]
-                    ),
-                    duplicate_order_cooldown_seconds=int(
-                        config[
-                            "duplicate_order_cooldown_seconds"
-                        ]
-                    ),
-                    phase=str(
-                        config[
-                            "phase"
-                        ]
-                    ),
-                    enforce_daily_profit_cap=bool(
-                        config[
-                            "enforce_daily_profit_cap"
-                        ]
-                    ),
-                    auto_calculate_evaluation_metrics=bool(
-                        config[
-                            "auto_calculate_evaluation_metrics"
-                        ]
-                    ),
-                    evaluation_start_time=config.get(
-                        "evaluation_start_time"
-                    ),
-                    evaluation_lookback_days=int(
-                        config[
-                            "evaluation_lookback_days"
-                        ]
-                    ),
-                    confirm_live_execution=bool(
-                        config.get(
-                            "confirm_live_execution",
-                            False
+                    )
+                ]
+
+                if (
+                    self.bot_service._is_auto_symbol(
+                        str(
+                            config["symbol"]
                         )
                     )
-                )
+                    and self.bot_service._env_bool(
+                        "AUTO_MULTI_INSTRUMENT_CYCLE_ENABLED",
+                        True
+                    )
+                ):
+                    max_symbols = self.bot_service._env_int(
+                        "AUTO_MAX_INSTRUMENTS_PER_CYCLE",
+                        4,
+                        minimum=1
+                    )
+                    run_symbols = (
+                        self.bot_service
+                        ._auto_symbol_candidates()
+                    )[:max_symbols]
+
+                for run_symbol in run_symbols:
+                    if (
+                        self._stop_event is not None
+                        and self._stop_event.is_set()
+                    ):
+                        break
+
+                    await self.bot_service.run_once(
+                        account_id=int(
+                            config["account_id"]
+                        ),
+                        symbol=run_symbol,
+                        dry_run=bool(
+                            config["dry_run"]
+                        ),
+                        account_size=int(
+                            config["account_size"]
+                        ),
+                        planned_quantity=int(
+                            config["planned_quantity"]
+                        ),
+                        current_mll=config.get(
+                            "current_mll"
+                        ),
+                        best_day_profit=config.get(
+                            "best_day_profit"
+                        ),
+                        max_risk_per_trade=config.get(
+                            "max_risk_per_trade"
+                        ),
+                        daily_pnl=config.get(
+                            "daily_pnl"
+                        ),
+                        evaluation_trading_days=config.get(
+                            "evaluation_trading_days"
+                        ),
+                        daily_loss_limit=config.get(
+                            "daily_loss_limit"
+                        ),
+                        max_position_quantity=config.get(
+                            "max_position_quantity"
+                        ),
+                        kill_switch=False,
+                        max_quote_age_seconds=int(
+                            config["max_quote_age_seconds"]
+                        ),
+                        order_type=str(
+                            config["order_type"]
+                        ),
+                        lookback_hours=int(
+                            config["lookback_hours"]
+                        ),
+                        auto_start_realtime=bool(
+                            config["auto_start_realtime"]
+                        ),
+                        realtime_warmup_seconds=int(
+                            config["realtime_warmup_seconds"]
+                        ),
+                        live=bool(
+                            config["live"]
+                        ),
+                        duplicate_order_cooldown_seconds=int(
+                            config[
+                                "duplicate_order_cooldown_seconds"
+                            ]
+                        ),
+                        phase=str(
+                            config[
+                                "phase"
+                            ]
+                        ),
+                        enforce_daily_profit_cap=bool(
+                            config[
+                                "enforce_daily_profit_cap"
+                            ]
+                        ),
+                        auto_calculate_evaluation_metrics=bool(
+                            config[
+                                "auto_calculate_evaluation_metrics"
+                            ]
+                        ),
+                        evaluation_start_time=config.get(
+                            "evaluation_start_time"
+                        ),
+                        evaluation_lookback_days=int(
+                            config[
+                                "evaluation_lookback_days"
+                            ]
+                        ),
+                        confirm_live_execution=bool(
+                            config.get(
+                                "confirm_live_execution",
+                                False
+                            )
+                        )
+                    )
 
                 self.bot_state_service.mark_loop_tick(
                     next_run_at=self._utc_after_iso(

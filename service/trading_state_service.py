@@ -124,6 +124,12 @@ class TradingStateService:
             {}
         )
 
+        market_realtime_data = (
+            self.realtime_service.get_latest_market_data(
+                contract_id=contract_id
+            )
+        )
+
         # =========================
         # Optional Historical Data
         # =========================
@@ -160,13 +166,13 @@ class TradingStateService:
             "contract": selected_contract,
 
             "market": {
-                "quote": realtime_data.get(
+                "quote": market_realtime_data.get(
                     "quote"
                 ),
-                "market_trade": realtime_data.get(
+                "market_trade": market_realtime_data.get(
                     "market_trade"
                 ),
-                "depth": realtime_data.get(
+                "depth": market_realtime_data.get(
                     "depth"
                 ),
                 "historical_bars": historical_bars

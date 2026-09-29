@@ -42,7 +42,7 @@ pip install -r requirements.txt
 ## 3. Run
 
 ```powershell
-uvicorn main:app --reload
+uvicorn main:app --reload --no-access-log
 ```
 
 Open Swagger:
