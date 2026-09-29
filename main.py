@@ -1,8 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
+import json
 import os
+from datetime import datetime, timezone
 
 from service.topstep_service import TopstepService
 from service.account_service import AccountService
@@ -29,6 +31,7 @@ from service.autonomous_bot_service import AutonomousBotService
 from service.trading_day_service import TradingDayService
 from service.topstep_session_service import TopstepSessionService
 from service.auth_service import AuthService
+from service.websocket_manager import WebSocketManager
 
 app = FastAPI(
     title="TopstepX API Test",
@@ -109,6 +112,8 @@ topstep_session_service = TopstepSessionService(
 auth_service = AuthService(
     database_service=database_service
 )
+
+ws_manager = WebSocketManager()
 
 autonomous_services_by_session = {}
 bot_state_services_by_session = {}
@@ -688,6 +693,85 @@ def health():
 )
 def database_health():
     return database_service.health()
+
+
+async def _ws_telemetry_broadcast_loop():
+    while True:
+        try:
+            if ws_manager.count() > 0:
+                quote_raw = realtime_service.latest.get("quote")
+                quote_data = None
+                if isinstance(quote_raw, dict):
+                    quote_inner = quote_raw.get("data", {}) if isinstance(quote_raw.get("data"), dict) else {}
+                    price = (
+                        quote_inner.get("lastPrice")
+                        or quote_inner.get("price")
+                        or quote_inner.get("settlementPrice")
+                    )
+                    if price is not None:
+                        quote_data = {
+                            "contract_id": quote_raw.get("contract_id"),
+                            "price": float(price),
+                            "change": float(quote_inner.get("netChange") or 0.0),
+                            "high": quote_inner.get("high"),
+                            "low": quote_inner.get("low"),
+                            "open": quote_inner.get("open"),
+                        }
+
+                pos_raw = realtime_service.latest.get("position")
+                pos_data = None
+                if isinstance(pos_raw, dict):
+                    pos_inner = pos_raw.get("data", {}) if isinstance(pos_raw.get("data"), dict) else {}
+                    pos_data = {
+                        "contract_id": pos_raw.get("contract_id"),
+                        "size": pos_inner.get("size") or pos_inner.get("quantity") or 0,
+                        "side": str(pos_inner.get("type") or pos_inner.get("side") or "").upper(),
+                        "entry_price": pos_inner.get("avgPrice") or pos_inner.get("entryPrice"),
+                    }
+
+                kill_switch = bot_state_service.get_state().get("kill_switch", {})
+                runtime_status = autonomous_bot_service.status()
+                is_running = bool(runtime_status.get("loop", {}).get("running", False))
+
+                await ws_manager.broadcast({
+                    "type": "TELEMETRY",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "quote": quote_data,
+                    "position": pos_data,
+                    "bot_status": {
+                        "is_running": is_running,
+                        "kill_switch_active": bool(kill_switch.get("enabled", False)),
+                        "uptime": runtime_status.get("loop", {}).get("started_at"),
+                    }
+                })
+        except Exception:
+            pass
+
+        await asyncio.sleep(0.3)
+
+
+@app.on_event("startup")
+async def startup_services():
+    asyncio.create_task(_ws_telemetry_broadcast_loop())
+
+
+@app.websocket("/ws")
+@app.websocket("/ws/dashboard")
+async def websocket_dashboard_endpoint(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+    try:
+        await websocket.send_text(json.dumps({
+            "type": "CONNECTED",
+            "message": "AI Trading WebSocket live stream active",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }))
+        while True:
+            msg = await websocket.receive_text()
+            clean_msg = (msg or "").strip().lower()
+            if clean_msg == "ping" or '"ping"' in clean_msg:
+                await websocket.send_text(json.dumps({"type": "PONG"}))
+    except (WebSocketDisconnect, Exception):
+        await ws_manager.disconnect(websocket)
 
 
 @app.on_event(
