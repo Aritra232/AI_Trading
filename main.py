@@ -28,6 +28,7 @@ from service.db_bot_state_service import DbBotStateService
 from service.autonomous_bot_service import AutonomousBotService
 from service.trading_day_service import TradingDayService
 from service.topstep_session_service import TopstepSessionService
+from service.auth_service import AuthService
 
 app = FastAPI(
     title="TopstepX API Test",
@@ -102,6 +103,10 @@ audit_service = AuditService(
 bot_state_service = BotStateService()
 
 topstep_session_service = TopstepSessionService(
+    database_service=database_service
+)
+
+auth_service = AuthService(
     database_service=database_service
 )
 
@@ -742,6 +747,60 @@ async def auth_test(
             status_code=500,
             detail=str(exc)
         )
+
+
+class UserLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post(
+    "/auth/login",
+    tags=["User Authentication"]
+)
+async def user_login(
+    payload: UserLoginRequest
+):
+    result = auth_service.authenticate_user(
+        email=payload.email,
+        password=payload.password
+    )
+    if not result:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password."
+        )
+
+    return {
+        "success": True,
+        "token": result["token"],
+        "user": result["user"]
+    }
+
+
+@app.get(
+    "/auth/me",
+    tags=["User Authentication"]
+)
+async def user_me(
+    token: str
+):
+    session = auth_service.verify_token(token)
+    if not session:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired session token."
+        )
+
+    return {
+        "success": True,
+        "user": {
+            "id": session["user_id"],
+            "email": session["email"],
+            "name": session["name"],
+            "role": session["role"]
+        }
+    }
 
 
 class TopstepLoginRequest(BaseModel):
