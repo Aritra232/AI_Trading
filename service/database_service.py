@@ -219,6 +219,81 @@ class DatabaseService:
 
         return document
 
+    def get_active_session_by_username(
+        self,
+        username: str,
+        user_id: str | None = None
+    ) -> dict[str, Any] | None:
+        if not self.is_enabled():
+            return None
+
+        query: dict[str, Any] = {
+            "topstep_username": username,
+            "is_active": True
+        }
+
+        if user_id:
+            query["user_id"] = user_id
+
+        try:
+            sessions = list(
+                self.db.topstep_sessions.find(
+                    query,
+                    {
+                        "_id": 0
+                    }
+                ).sort(
+                    [
+                        (
+                            "updated_at",
+                            -1
+                        ),
+                        (
+                            "last_used_at",
+                            -1
+                        )
+                    ]
+                )
+            )
+
+            if not sessions:
+                return None
+
+            for session in sessions:
+                state_doc = self.db.bot_state.find_one(
+                    {
+                        "session_id": session.get(
+                            "session_id"
+                        )
+                    },
+                    {
+                        "_id": 0,
+                        "state.loop.running": 1
+                    }
+                )
+                state = (
+                    state_doc.get(
+                        "state",
+                        {}
+                    )
+                    if state_doc
+                    else {}
+                )
+                loop = state.get(
+                    "loop",
+                    {}
+                )
+
+                if loop.get(
+                    "running"
+                ):
+                    session["has_running_bot_state"] = True
+                    return session
+
+            return sessions[0]
+
+        except Exception:
+            return None
     def deactivate_session(
         self,
         session_id: str

@@ -695,60 +695,125 @@ def database_health():
     return database_service.health()
 
 
+def _ws_quote_payload(runtime_realtime_service):
+    quote_raw = runtime_realtime_service.latest.get("quote")
+    if not isinstance(quote_raw, dict):
+        return None
+
+    quote_inner = (
+        quote_raw.get("data", {})
+        if isinstance(quote_raw.get("data"), dict)
+        else {}
+    )
+    price = (
+        quote_inner.get("lastPrice")
+        or quote_inner.get("price")
+        or quote_inner.get("settlementPrice")
+    )
+
+    if price is None:
+        return None
+
+    return {
+        "contract_id": quote_raw.get("contract_id"),
+        "price": float(price),
+        "change": float(quote_inner.get("netChange") or 0.0),
+        "high": quote_inner.get("high"),
+        "low": quote_inner.get("low"),
+        "open": quote_inner.get("open"),
+    }
+
+
+def _ws_position_payload(runtime_realtime_service):
+    pos_raw = runtime_realtime_service.latest.get("position")
+    if not isinstance(pos_raw, dict):
+        return None
+
+    pos_inner = (
+        pos_raw.get("data", {})
+        if isinstance(pos_raw.get("data"), dict)
+        else {}
+    )
+
+    return {
+        "contract_id": pos_raw.get("contract_id"),
+        "size": pos_inner.get("size") or pos_inner.get("quantity") or 0,
+        "side": str(pos_inner.get("type") or pos_inner.get("side") or "").upper(),
+        "entry_price": pos_inner.get("avgPrice") or pos_inner.get("entryPrice"),
+    }
+
+
 async def _ws_telemetry_broadcast_loop():
     while True:
         try:
-            if ws_manager.count() > 0:
-                quote_raw = realtime_service.latest.get("quote")
-                quote_data = None
-                if isinstance(quote_raw, dict):
-                    quote_inner = quote_raw.get("data", {}) if isinstance(quote_raw.get("data"), dict) else {}
-                    price = (
-                        quote_inner.get("lastPrice")
-                        or quote_inner.get("price")
-                        or quote_inner.get("settlementPrice")
+            connections = await ws_manager.connections()
+
+            for websocket, session_id in connections:
+                runtime = build_runtime(
+                    session_id=session_id
+                )
+                runtime_realtime_service = runtime[
+                    "realtime_service"
+                ]
+                state_service = get_bot_state_service(
+                    session_id
+                )
+                runtime_status = get_autonomous_service(
+                    session_id=session_id,
+                    runtime=runtime
+                ).status()
+                state = (
+                    state_service.get_state()
+                    if hasattr(state_service, "get_state")
+                    else state_service.get_status()
+                )
+                kill_switch = state.get(
+                    "kill_switch",
+                    {}
+                )
+                is_running = bool(
+                    runtime_status.get(
+                        "loop",
+                        {}
+                    ).get(
+                        "running",
+                        False
                     )
-                    if price is not None:
-                        quote_data = {
-                            "contract_id": quote_raw.get("contract_id"),
-                            "price": float(price),
-                            "change": float(quote_inner.get("netChange") or 0.0),
-                            "high": quote_inner.get("high"),
-                            "low": quote_inner.get("low"),
-                            "open": quote_inner.get("open"),
+                )
+
+                await ws_manager.send(
+                    websocket,
+                    {
+                        "type": "TELEMETRY",
+                        "session_id": session_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "quote": _ws_quote_payload(
+                            runtime_realtime_service
+                        ),
+                        "position": _ws_position_payload(
+                            runtime_realtime_service
+                        ),
+                        "bot_status": {
+                            "is_running": is_running,
+                            "kill_switch_active": bool(
+                                kill_switch.get(
+                                    "enabled",
+                                    False
+                                )
+                            ),
+                            "uptime": runtime_status.get(
+                                "loop",
+                                {}
+                            ).get(
+                                "started_at"
+                            ),
                         }
-
-                pos_raw = realtime_service.latest.get("position")
-                pos_data = None
-                if isinstance(pos_raw, dict):
-                    pos_inner = pos_raw.get("data", {}) if isinstance(pos_raw.get("data"), dict) else {}
-                    pos_data = {
-                        "contract_id": pos_raw.get("contract_id"),
-                        "size": pos_inner.get("size") or pos_inner.get("quantity") or 0,
-                        "side": str(pos_inner.get("type") or pos_inner.get("side") or "").upper(),
-                        "entry_price": pos_inner.get("avgPrice") or pos_inner.get("entryPrice"),
                     }
+                )
+        except Exception as exc:
+            print(f"[WS] telemetry loop error: {exc}")
 
-                kill_switch = bot_state_service.get_state().get("kill_switch", {})
-                runtime_status = autonomous_bot_service.status()
-                is_running = bool(runtime_status.get("loop", {}).get("running", False))
-
-                await ws_manager.broadcast({
-                    "type": "TELEMETRY",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "quote": quote_data,
-                    "position": pos_data,
-                    "bot_status": {
-                        "is_running": is_running,
-                        "kill_switch_active": bool(kill_switch.get("enabled", False)),
-                        "uptime": runtime_status.get("loop", {}).get("started_at"),
-                    }
-                })
-        except Exception:
-            pass
-
-        await asyncio.sleep(0.3)
-
+        await asyncio.sleep(1)
 
 @app.on_event("startup")
 async def startup_services():
@@ -758,7 +823,8 @@ async def startup_services():
 @app.websocket("/ws")
 @app.websocket("/ws/dashboard")
 async def websocket_dashboard_endpoint(websocket: WebSocket):
-    await ws_manager.connect(websocket)
+    session_id = websocket.query_params.get("session_id")
+    await ws_manager.connect(websocket, session_id=session_id)
     try:
         await websocket.send_text(json.dumps({
             "type": "CONNECTED",
@@ -980,8 +1046,15 @@ async def get_or_create_default_session():
     using the configured .env credentials (TOPSTEP_USERNAME & TOPSTEP_API_KEY_PRIMARY).
     """
     try:
+        default_user = "dashboard_user"
+        default_username = os.getenv("TOPSTEP_USERNAME", "").strip()
+        default_key = os.getenv("TOPSTEP_API_KEY_PRIMARY", "").strip()
+
         for session_id, s_data in topstep_session_service.sessions.items():
             client = s_data.get("client")
+            session_username = str(s_data.get("username", "")).strip()
+            if session_username != default_username:
+                continue
             if client and getattr(client, "token", None):
                 runtime = build_runtime(session_id=session_id)
                 accounts_result = await runtime["account_service"].get_accounts()

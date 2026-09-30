@@ -22,6 +22,101 @@ class TopstepSessionService:
             "Z"
         )
 
+    def _use_existing_session(
+        self,
+        existing: dict[str, Any],
+        client: TopstepService,
+        username: str,
+        user_id: str,
+        token: str | None
+    ) -> dict[str, Any]:
+        session_id = existing.get(
+            "session_id"
+        )
+        now = self._utc_now_iso()
+
+        if not session_id:
+            return {
+                "success": False,
+                "reused": False,
+                "reason": "Existing session did not include a session_id."
+            }
+
+        was_in_memory = session_id in self.sessions
+
+        if not was_in_memory:
+            self.sessions[session_id] = {
+                "client": client,
+                "realtime_service": RealtimeService(
+                    topstep_service=client
+                ),
+                "user_id": existing.get(
+                    "user_id",
+                    user_id
+                ),
+                "username": username,
+                "created_at": existing.get(
+                    "created_at",
+                    now
+                ),
+                "last_used_at": now,
+                "restored_from_database": True
+            }
+        else:
+            self.sessions[session_id]["last_used_at"] = now
+            self.sessions[session_id]["username"] = username
+            self.sessions[session_id]["user_id"] = existing.get(
+                "user_id",
+                user_id
+            )
+
+        db_result = None
+
+        if self.database_service is not None:
+            db_result = self.database_service.upsert_session(
+                {
+                    "session_id": session_id,
+                    "user_id": existing.get(
+                        "user_id",
+                        user_id
+                    ),
+                    "topstep_username": username,
+                    "topstep_token": token or existing.get(
+                        "topstep_token"
+                    ),
+                    "is_active": True,
+                    "created_at": existing.get(
+                        "created_at",
+                        now
+                    ),
+                    "last_used_at": now
+                }
+            )
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "user_id": existing.get(
+                "user_id",
+                user_id
+            ),
+            "token_received": bool(
+                token or existing.get(
+                    "topstep_token"
+                )
+            ),
+            "username": username,
+            "message": "Existing active Topstep session reused.",
+            "reused": True,
+            "restored_from_database": not was_in_memory,
+            "has_running_bot_state": bool(
+                existing.get(
+                    "has_running_bot_state",
+                    False
+                )
+            ),
+            "database": db_result
+        }
     async def login(
         self,
         username: str,
@@ -34,6 +129,23 @@ class TopstepSessionService:
         )
 
         auth_result = await client.authenticate()
+
+        if self.database_service is not None:
+            existing = self.database_service.get_active_session_by_username(
+                username=username,
+                user_id=user_id
+            )
+
+            if existing:
+                return self._use_existing_session(
+                    existing=existing,
+                    client=client,
+                    username=username,
+                    user_id=user_id,
+                    token=auth_result.get(
+                        "token"
+                    )
+                )
 
         session_id = uuid.uuid4().hex
 
