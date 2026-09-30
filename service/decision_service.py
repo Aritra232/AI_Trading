@@ -78,7 +78,11 @@ class DecisionService:
 
                 "action": "EXIT",
 
-                "execution_allowed": False,
+                "execution_allowed": True,
+
+                "planned_quantity": (
+                    planned_quantity
+                ),
 
                 "strategy": strategy_result,
 
@@ -87,8 +91,7 @@ class DecisionService:
                 "risk": risk_result,
 
                 "reason": (
-                    "AI strategy requested an exit. "
-                    "Execution layer is not enabled yet."
+                    "AI strategy requested an exit."
                 ),
 
                 "decision_version": (

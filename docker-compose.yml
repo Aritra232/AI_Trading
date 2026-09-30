@@ -1,0 +1,20 @@
+services:
+  ai-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-trading-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "4000"
+    ports:
+      - "4000:4000"
+    volumes:
+      - ai-backend-state:/app/state
+      - ai-backend-logs:/app/logs
+
+volumes:
+  ai-backend-state:
+  ai-backend-logs:

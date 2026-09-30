@@ -1,5 +1,7 @@
 import asyncio
+import os
 import threading
+import time
 from typing import Any, Dict, Optional
 
 from signalrcore.hub_connection_builder import HubConnectionBuilder
@@ -16,6 +18,13 @@ class RealtimeService:
 
         self.user_account_id: Optional[int] = None
         self.market_contract_id: Optional[str] = None
+        self.market_contract_ids: set[str] = set()
+        self.user_connected = False
+        self.market_connected = False
+        self._last_user_start_attempt = 0.0
+        self._last_market_start_attempt = 0.0
+        self._user_start_lock = asyncio.Lock()
+        self._market_start_lock = asyncio.Lock()
 
         self.latest: Dict[str, Any] = {
             "account": None,
@@ -24,7 +33,10 @@ class RealtimeService:
             "trade": None,
             "quote": None,
             "market_trade": None,
-            "depth": None
+            "depth": None,
+            "quotes_by_contract": {},
+            "market_trades_by_contract": {},
+            "depth_by_contract": {}
         }
 
         self._lock = threading.Lock()
@@ -33,12 +45,213 @@ class RealtimeService:
     # Helpers
     # =========================
 
+    def _debug_enabled(self) -> bool:
+        return os.getenv(
+            "REALTIME_DEBUG",
+            "false"
+        ).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on"
+        }
+
+    def _debug_print(
+        self,
+        key: str,
+        value: Any
+    ):
+        if not self._debug_enabled():
+            return
+
+        print(f"\n[REALTIME] {key}")
+        print(value)
+
+    def _reconnect_cooldown_seconds(self) -> float:
+        try:
+            return float(
+                os.getenv(
+                    "REALTIME_RECONNECT_COOLDOWN_SECONDS",
+                    "15"
+                )
+            )
+
+        except Exception:
+            return 15.0
+
+    def _within_reconnect_cooldown(
+        self,
+        last_attempt: float
+    ) -> bool:
+        return (
+            time.monotonic() - last_attempt
+            < self._reconnect_cooldown_seconds()
+        )
+
     def _set_latest(self, key: str, value: Any):
         with self._lock:
             self.latest[key] = value
 
-        print(f"\n[REALTIME] {key}")
-        print(value)
+        self._debug_print(
+            key,
+            value
+        )
+
+    def _set_latest_quote(self, value: Any):
+        with self._lock:
+            previous = self.latest.get(
+                "quote"
+            )
+
+            merged = value
+
+            if (
+                isinstance(previous, dict)
+                and isinstance(value, dict)
+            ):
+                previous_data = previous.get(
+                    "data",
+                    {}
+                )
+
+                value_data = value.get(
+                    "data",
+                    {}
+                )
+
+                if (
+                    isinstance(previous_data, dict)
+                    and isinstance(value_data, dict)
+                    and previous.get("contract_id")
+                    == value.get("contract_id")
+                ):
+                    merged_data = {
+                        **previous_data,
+                        **value_data
+                    }
+
+                    merged = {
+                        **previous,
+                        **value,
+                        "data": merged_data
+                    }
+
+            contract_id = (
+                merged.get(
+                    "contract_id"
+                )
+                if isinstance(
+                    merged,
+                    dict
+                )
+                else None
+            )
+
+            if contract_id:
+                quotes_by_contract = dict(
+                    self.latest.get(
+                        "quotes_by_contract",
+                        {}
+                    )
+                    or {}
+                )
+                quotes_by_contract[str(
+                    contract_id
+                )] = merged
+                self.latest["quotes_by_contract"] = (
+                    quotes_by_contract
+                )
+
+            self.latest["quote"] = merged
+
+        self._debug_print(
+            "quote",
+            merged
+        )
+
+    def _set_latest_market_trade(
+        self,
+        value: Any
+    ):
+        with self._lock:
+            contract_id = (
+                value.get(
+                    "contract_id"
+                )
+                if isinstance(
+                    value,
+                    dict
+                )
+                else None
+            )
+
+            if contract_id:
+                trades_by_contract = dict(
+                    self.latest.get(
+                        "market_trades_by_contract",
+                        {}
+                    )
+                    or {}
+                )
+                trades_by_contract[str(
+                    contract_id
+                )] = value
+                self.latest[
+                    "market_trades_by_contract"
+                ] = trades_by_contract
+
+            self.latest["market_trade"] = value
+
+        self._debug_print(
+            "market_trade",
+            value
+        )
+
+    def _set_latest_depth(
+        self,
+        value: Any
+    ):
+        with self._lock:
+            contract_id = (
+                value.get(
+                    "contract_id"
+                )
+                if isinstance(
+                    value,
+                    dict
+                )
+                else None
+            )
+
+            if contract_id:
+                depth_by_contract = dict(
+                    self.latest.get(
+                        "depth_by_contract",
+                        {}
+                    )
+                    or {}
+                )
+                depth_by_contract[str(
+                    contract_id
+                )] = value
+                self.latest["depth_by_contract"] = (
+                    depth_by_contract
+                )
+
+            self.latest["depth"] = value
+
+        self._debug_print(
+            "depth",
+            value
+        )
+
+    def _clear_market_latest(
+        self
+    ):
+        with self._lock:
+            self.latest["quote"] = None
+            self.latest["market_trade"] = None
+            self.latest["depth"] = None
 
     def _normalize_single_event(self, args):
         if isinstance(args, list) and len(args) == 1:
@@ -121,16 +334,24 @@ class RealtimeService:
             )
         )
 
-        connection.on_open(
-            lambda: print(
+        def on_open():
+            self.user_connected = True
+            print(
                 "[REALTIME] User Hub connected"
             )
+
+        def on_close():
+            self.user_connected = False
+            print(
+                "[REALTIME] User Hub disconnected"
+            )
+
+        connection.on_open(
+            on_open
         )
 
         connection.on_close(
-            lambda: print(
-                "[REALTIME] User Hub disconnected"
-            )
+            on_close
         )
 
         connection.on_error(
@@ -145,59 +366,106 @@ class RealtimeService:
         self,
         account_id: int
     ):
-        token = await self.topstep_service.get_token()
+        async with self._user_start_lock:
+            if (
+                self.user_connection is not None
+                and self.user_account_id == account_id
+                and self.user_connected
+            ):
+                return {
+                    "success": True,
+                    "message": (
+                        "User realtime connection already active"
+                    ),
+                    "account_id": account_id,
+                    "reused": True
+                }
 
-        # Stop existing connection first
-        if self.user_connection is not None:
+            if (
+                self.user_connection is not None
+                and self.user_account_id == account_id
+                and self._within_reconnect_cooldown(
+                    self._last_user_start_attempt
+                )
+            ):
+                return {
+                    "success": True,
+                    "message": (
+                        "User realtime reconnect throttled"
+                    ),
+                    "account_id": account_id,
+                    "reused": True,
+                    "throttled": True
+                }
+
+            token = await self.topstep_service.get_token()
+
+            if self.user_connection is not None:
+                try:
+                    self.user_connection.stop()
+                except Exception:
+                    pass
+
+                self.user_connected = False
+
+            self.user_account_id = account_id
+            self._last_user_start_attempt = time.monotonic()
+
+            self.user_connection = (
+                self._build_user_connection(token)
+            )
+
             try:
-                self.user_connection.stop()
-            except Exception:
-                pass
+                self.user_connection.start()
 
-        self.user_account_id = account_id
+                await asyncio.sleep(2)
 
-        self.user_connection = (
-            self._build_user_connection(token)
-        )
+                self.user_connection.send(
+                    "SubscribeAccounts",
+                    []
+                )
 
-        self.user_connection.start()
+                self.user_connection.send(
+                    "SubscribeOrders",
+                    [account_id]
+                )
 
-        # Allow connection to establish
-        await asyncio.sleep(2)
+                self.user_connection.send(
+                    "SubscribePositions",
+                    [account_id]
+                )
 
-        # Official ProjectX subscriptions
+                self.user_connection.send(
+                    "SubscribeTrades",
+                    [account_id]
+                )
 
-        self.user_connection.send(
-            "SubscribeAccounts",
-            []
-        )
+            except Exception as exc:
+                self.user_connected = False
 
-        self.user_connection.send(
-            "SubscribeOrders",
-            [account_id]
-        )
+                return {
+                    "success": False,
+                    "message": (
+                        "User realtime connection failed"
+                    ),
+                    "account_id": account_id,
+                    "error": str(
+                        exc
+                    )
+                }
 
-        self.user_connection.send(
-            "SubscribePositions",
-            [account_id]
-        )
-
-        self.user_connection.send(
-            "SubscribeTrades",
-            [account_id]
-        )
-
-        return {
-            "success": True,
-            "message": "User realtime connection started",
-            "account_id": account_id,
-            "subscriptions": [
-                "accounts",
-                "orders",
-                "positions",
-                "trades"
-            ]
-        }
+            return {
+                "success": True,
+                "message": "User realtime connection started",
+                "account_id": account_id,
+                "subscriptions": [
+                    "accounts",
+                    "orders",
+                    "positions",
+                    "trades"
+                ],
+                "reused": False
+            }
 
     # =========================
     # Market Hub
@@ -235,8 +503,7 @@ class RealtimeService:
         # Live quote
         connection.on(
             "GatewayQuote",
-            lambda args: self._set_latest(
-                "quote",
+            lambda args: self._set_latest_quote(
                 self._normalize_market_event(args)
             )
         )
@@ -244,8 +511,7 @@ class RealtimeService:
         # Market trade
         connection.on(
             "GatewayTrade",
-            lambda args: self._set_latest(
-                "market_trade",
+            lambda args: self._set_latest_market_trade(
                 self._normalize_market_event(args)
             )
         )
@@ -253,22 +519,29 @@ class RealtimeService:
         # DOM / Market Depth
         connection.on(
             "GatewayDepth",
-            lambda args: self._set_latest(
-                "depth",
+            lambda args: self._set_latest_depth(
                 self._normalize_market_event(args)
             )
         )
 
-        connection.on_open(
-            lambda: print(
+        def on_open():
+            self.market_connected = True
+            print(
                 "[REALTIME] Market Hub connected"
             )
+
+        def on_close():
+            self.market_connected = False
+            print(
+                "[REALTIME] Market Hub disconnected"
+            )
+
+        connection.on_open(
+            on_open
         )
 
         connection.on_close(
-            lambda: print(
-                "[REALTIME] Market Hub disconnected"
-            )
+            on_close
         )
 
         connection.on_error(
@@ -283,53 +556,147 @@ class RealtimeService:
         self,
         contract_id: str
     ):
-        token = await self.topstep_service.get_token()
+        async with self._market_start_lock:
+            if (
+                self.market_connection is not None
+                and self.market_connected
+            ):
+                if str(
+                    contract_id
+                ) not in self.market_contract_ids:
+                    try:
+                        self.market_connection.send(
+                            "SubscribeContractQuotes",
+                            [contract_id]
+                        )
 
-        # Stop existing connection first
-        if self.market_connection is not None:
+                        self.market_connection.send(
+                            "SubscribeContractTrades",
+                            [contract_id]
+                        )
+
+                        self.market_connection.send(
+                            "SubscribeContractMarketDepth",
+                            [contract_id]
+                        )
+
+                        self.market_contract_ids.add(
+                            str(
+                                contract_id
+                            )
+                        )
+                        self.market_contract_id = contract_id
+
+                    except Exception:
+                        self.market_connected = False
+
+                    else:
+                        return {
+                            "success": True,
+                            "message": (
+                                "Market realtime contract subscribed"
+                            ),
+                            "contract_id": contract_id,
+                            "reused": True
+                        }
+
+                else:
+                    self.market_contract_id = contract_id
+
+                    return {
+                        "success": True,
+                        "message": (
+                            "Market realtime connection already active"
+                        ),
+                        "contract_id": contract_id,
+                        "reused": True
+                    }
+
+            if (
+                self.market_connection is not None
+                and self.market_contract_id == contract_id
+                and self.market_connected
+                and self._within_reconnect_cooldown(
+                    self._last_market_start_attempt
+                )
+            ):
+                return {
+                    "success": True,
+                    "message": (
+                        "Market realtime reconnect throttled"
+                    ),
+                    "contract_id": contract_id,
+                    "reused": True,
+                    "throttled": True
+                }
+
+            token = await self.topstep_service.get_token()
+
+            if self.market_connection is not None:
+                try:
+                    self.market_connection.stop()
+                except Exception:
+                    pass
+
+                self.market_connected = False
+
+            self.market_contract_id = contract_id
+            self.market_contract_ids = {
+                str(
+                    contract_id
+                )
+            }
+            self._last_market_start_attempt = time.monotonic()
+
+            self.market_connection = (
+                self._build_market_connection(token)
+            )
+
             try:
-                self.market_connection.stop()
-            except Exception:
-                pass
+                self.market_connection.start()
 
-        self.market_contract_id = contract_id
+                await asyncio.sleep(2)
 
-        self.market_connection = (
-            self._build_market_connection(token)
-        )
+                self.market_connection.send(
+                    "SubscribeContractQuotes",
+                    [contract_id]
+                )
 
-        self.market_connection.start()
+                self.market_connection.send(
+                    "SubscribeContractTrades",
+                    [contract_id]
+                )
 
-        # Allow connection to establish
-        await asyncio.sleep(2)
+                self.market_connection.send(
+                    "SubscribeContractMarketDepth",
+                    [contract_id]
+                )
 
-        # Official ProjectX subscriptions
+            except Exception as exc:
+                self.market_connected = False
 
-        self.market_connection.send(
-            "SubscribeContractQuotes",
-            [contract_id]
-        )
+                return {
+                    "success": False,
+                    "message": (
+                        "Market realtime connection failed"
+                    ),
+                    "contract_id": contract_id,
+                    "error": str(
+                        exc
+                    )
+                }
 
-        self.market_connection.send(
-            "SubscribeContractTrades",
-            [contract_id]
-        )
-
-        self.market_connection.send(
-            "SubscribeContractMarketDepth",
-            [contract_id]
-        )
-
-        return {
-            "success": True,
-            "message": "Market realtime connection started",
-            "contract_id": contract_id,
-            "subscriptions": [
-                "quotes",
-                "market_trades",
-                "market_depth"
-            ]
-        }
+            return {
+                "success": True,
+                "message": "Market realtime connection started",
+                "contract_id": contract_id,
+                "subscriptions": [
+                    "quotes",
+                    "market_trades",
+                    "market_depth"
+                ],
+                "reused": False
+            }
 
     # =========================
     # Latest Data
@@ -341,7 +708,62 @@ class RealtimeService:
                 "success": True,
                 "user_account_id": self.user_account_id,
                 "market_contract_id": self.market_contract_id,
+                "market_contract_ids": list(
+                    self.market_contract_ids
+                ),
                 "data": dict(self.latest)
+            }
+
+    def get_latest_market_data(
+        self,
+        contract_id: str | None = None
+    ):
+        with self._lock:
+            if not contract_id:
+                return {
+                    "quote": self.latest.get(
+                        "quote"
+                    ),
+                    "market_trade": self.latest.get(
+                        "market_trade"
+                    ),
+                    "depth": self.latest.get(
+                        "depth"
+                    )
+                }
+
+            contract_key = str(
+                contract_id
+            )
+
+            return {
+                "quote": (
+                    self.latest.get(
+                        "quotes_by_contract",
+                        {}
+                    )
+                    or {}
+                ).get(
+                    contract_key
+                ),
+                "market_trade": (
+                    self.latest.get(
+                        "market_trades_by_contract",
+                        {}
+                    )
+                    or {}
+                ).get(
+                    contract_key
+                ),
+                "depth": (
+                    self.latest.get(
+                        "depth_by_contract",
+                        {}
+                    )
+                    or {}
+                ).get(
+                    contract_key
+                )
             }
 
     # =========================
@@ -356,6 +778,8 @@ class RealtimeService:
                 pass
 
             self.user_connection = None
+            self.user_connected = False
+            self.user_account_id = None
 
         if self.market_connection is not None:
             try:
@@ -364,6 +788,9 @@ class RealtimeService:
                 pass
 
             self.market_connection = None
+            self.market_connected = False
+            self.market_contract_id = None
+            self.market_contract_ids = set()
 
         return {
             "success": True,

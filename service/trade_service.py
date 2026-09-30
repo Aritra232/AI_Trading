@@ -2,8 +2,11 @@ from service.topstep_service import TopstepService
 
 
 class TradeService:
-    def __init__(self):
-        self.client = TopstepService()
+    def __init__(
+        self,
+        client: TopstepService | None = None
+    ):
+        self.client = client or TopstepService()
 
     async def get_trades(
         self,
