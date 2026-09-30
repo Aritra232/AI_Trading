@@ -1,7 +1,12 @@
 import asyncio
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 
 
 class BotService:
@@ -45,6 +50,102 @@ class BotService:
             "Z"
         )
 
+    def _dubai_timezone(self):
+        if ZoneInfo is not None:
+            try:
+                return ZoneInfo("Asia/Dubai")
+            except Exception:
+                pass
+
+        return timezone(
+            timedelta(hours=4)
+        )
+
+    def _parse_schedule_time(
+        self,
+        value: str,
+        default: time
+    ) -> time:
+        try:
+            hour_text, minute_text = str(value).strip().split(":", 1)
+            return time(
+                hour=int(hour_text),
+                minute=int(minute_text)
+            )
+        except Exception:
+            return default
+
+    def _dubai_trading_schedule(
+        self,
+        positions: list | None
+    ) -> dict:
+        enabled = self._env_bool(
+            "DUBAI_TRADING_DAY_SCHEDULE_ENABLED",
+            True
+        )
+        tz_name = os.getenv(
+            "TRADING_DAY_TIMEZONE",
+            "Asia/Dubai"
+        ).strip() or "Asia/Dubai"
+        start_time = self._parse_schedule_time(
+            os.getenv(
+                "DUBAI_TRADING_DAY_START",
+                "03:30"
+            ),
+            time(3, 30)
+        )
+        close_time = self._parse_schedule_time(
+            os.getenv(
+                "DUBAI_TRADING_DAY_CLOSE_OPEN_POSITIONS_AT",
+                "00:01"
+            ),
+            time(0, 1)
+        )
+
+        tz = self._dubai_timezone()
+        local_now = datetime.now(
+            timezone.utc
+        ).astimezone(
+            tz
+        )
+        local_time = local_now.time().replace(
+            second=0,
+            microsecond=0
+        )
+        position_count = len(
+            positions or []
+        )
+        outside_window = (
+            enabled
+            and local_time >= close_time
+            and local_time < start_time
+        )
+
+        return {
+            "enabled": enabled,
+            "timezone": tz_name,
+            "start_time": start_time.strftime("%H:%M"),
+            "close_open_positions_at": close_time.strftime("%H:%M"),
+            "local_time": local_now.isoformat(),
+            "market_window_open": not outside_window,
+            "outside_window": outside_window,
+            "position_count": position_count,
+            "close_open_positions": bool(
+                outside_window
+                and position_count > 0
+            ),
+            "block_new_entries": bool(outside_window),
+            "reason": (
+                (
+                    "Dubai trading day is closed. Open positions must be "
+                    "closed at/after 00:01 Dubai time and new entries are "
+                    "blocked until 03:30 Dubai time."
+                )
+                if outside_window
+                else None
+            ),
+            "schedule_version": "DUBAI_TRADING_DAY_SCHEDULE_V1"
+        }
     def _parse_datetime(
         self,
         value: str | None
@@ -2565,14 +2666,6 @@ class BotService:
                 100.0
             )
         )
-        min_hold_hours = self._env_float(
-            "POSITION_MIN_HOLD_HOURS",
-            10.0
-        )
-        max_hold_hours = self._env_float(
-            "POSITION_MAX_HOLD_HOURS",
-            12.0
-        )
 
         matched_positions = [
             position
@@ -2591,9 +2684,7 @@ class BotService:
                 "reason": None,
                 "profit_exit_usd": profit_exit_usd,
                 "rescan_loss_usd": rescan_loss_usd,
-                "hard_loss_exit_usd": hard_loss_exit_usd,
-                "min_hold_hours": min_hold_hours,
-                "max_hold_hours": max_hold_hours
+                "hard_loss_exit_usd": hard_loss_exit_usd
             }
 
         details = []
@@ -2642,49 +2733,6 @@ class BotService:
                     "estimated_pnl": pnl
                 }
             )
-
-        expired_positions = [
-            detail
-            for detail in details
-            if (
-                detail.get(
-                    "age_hours"
-                )
-                is not None
-                and detail.get(
-                    "age_hours"
-                )
-                >= max_hold_hours
-            )
-        ]
-
-        if expired_positions:
-            oldest_age = max(
-                detail.get(
-                    "age_hours"
-                )
-                or 0
-                for detail in expired_positions
-            )
-
-            return {
-                "enabled": True,
-                "status": "TIME_BRACKET_EXIT",
-                "action": "EXIT",
-                "estimated_pnl": total_pnl,
-                "current_price": current_price,
-                "positions": details,
-                "reason": (
-                    f"Client 10-12 hour holding bracket reached: "
-                    f"oldest position age {oldest_age:.2f}h >= "
-                    f"{max_hold_hours:.2f}h."
-                ),
-                "profit_exit_usd": profit_exit_usd,
-                "rescan_loss_usd": rescan_loss_usd,
-                "hard_loss_exit_usd": hard_loss_exit_usd,
-                "min_hold_hours": min_hold_hours,
-                "max_hold_hours": max_hold_hours
-            }
 
         if not pnl_available:
             return {
@@ -3583,7 +3631,92 @@ class BotService:
             strategy=strategy
         )
 
-        if daily_profit_lock.get(
+        dubai_trading_schedule = self._dubai_trading_schedule(
+            positions=positions
+        )
+
+        if dubai_trading_schedule.get(
+            "outside_window"
+        ):
+            close_positions = bool(
+                dubai_trading_schedule.get(
+                    "close_open_positions"
+                )
+            )
+            schedule_reason = dubai_trading_schedule.get(
+                "reason"
+            )
+
+            final_decision = {
+                "success": True,
+                "final_status": "DUBAI_TRADING_DAY_CLOSED",
+                "action": (
+                    "EXIT"
+                    if close_positions
+                    else "WAIT"
+                ),
+                "execution_allowed": close_positions,
+                "reason": schedule_reason,
+                "decision_version": (
+                    "FINAL_DECISION_DUBAI_TRADING_SCHEDULE_V1"
+                )
+            }
+
+            safety = {
+                "success": True,
+                "safety_status": (
+                    "PASS"
+                    if close_positions
+                    else "BLOCK"
+                ),
+                "safe_to_execute": close_positions,
+                "action": final_decision[
+                    "action"
+                ],
+                "blocks": (
+                    []
+                    if close_positions
+                    else [
+                        (
+                            "Dubai trading day is closed; "
+                            "new entries are blocked until 03:30 Dubai time."
+                        )
+                    ]
+                ),
+                "warnings": [],
+                "safety_version": (
+                    "SAFETY_DUBAI_TRADING_SCHEDULE_V1"
+                )
+            }
+
+            workflow["final_decision"] = final_decision
+            workflow["safety"] = safety
+            workflow["ready_for_execution"] = close_positions
+
+            if close_positions:
+                execution_result = (
+                    await self.execution_service.close_all_positions(
+                        account_id=account_id,
+                        positions=positions,
+                        dry_run=dry_run,
+                        confirm_live_execution=(
+                            confirm_live_execution
+                        ),
+                        reason=schedule_reason
+                    )
+                )
+            else:
+                execution_result = {
+                    "success": True,
+                    "execution_status": "BLOCKED",
+                    "submitted": False,
+                    "reason": schedule_reason,
+                    "execution_allowed": False,
+                    "safe_to_execute": False,
+                    "dry_run": dry_run
+                }
+
+        elif daily_profit_lock.get(
             "done_for_day"
         ):
             close_positions = bool(
@@ -4061,6 +4194,7 @@ class BotService:
             "market_gate": market_gate,
             "pre_trade_rules": pre_trade_rules,
             "daily_profit_lock": daily_profit_lock,
+            "dubai_trading_schedule": dubai_trading_schedule,
             "position_management": position_management,
             "rule": rule,
             "risk": risk,
